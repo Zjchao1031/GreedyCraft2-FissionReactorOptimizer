@@ -194,7 +194,7 @@ std::string blockDisplayName(const Block& block) {
     case BlockKind::Shield:
         return shieldTypes().at(static_cast<size_t>(block.type)).nameZh;
     case BlockKind::Irradiator:
-        return irradiatorRecipeTypes().at(static_cast<size_t>(block.type)).nameZh;
+        return "裂变中子辐照器";
     case BlockKind::Sink:
         return sinkTypes().at(static_cast<size_t>(block.type)).nameZh;
     }

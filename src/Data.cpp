@@ -241,6 +241,9 @@ const std::vector<ModeratorType>& moderatorTypes() {
         {"blockGraphite", "石墨块", "Graphite Block", 10, 1.1},
         {"blockBeryllium", "铍块", "Beryllium Block", 22, 1.05},
         {"nuclearcraft:heavy_water_moderator", "重水减速剂", "Heavy Water Moderator", 36, 1},
+        {"contenttweaker:water_mod", "轻水减速剂", "Light Water Moderator", 29, 0.95},
+        {"contenttweaker:pu_schmeared_be_mod", "钚-238 涂层铍减速剂", "Plutonium-238 Schmeared Beryllium Moderator", 49, 0.98},
+        {"contenttweaker:hydrocarbon_mod", "烃基减速剂", "Hydrocarbon Moderator", 3, 1.02},
     };
     return data;
 }
@@ -249,6 +252,8 @@ const std::vector<ReflectorType>& reflectorTypes() {
     static const std::vector<ReflectorType> data = {
         {"nuclearcraft:fission_reflector:0", "铍-碳中子反射器", "Beryllium-Carbon Neutron Reflector", 0.5, 1},
         {"nuclearcraft:fission_reflector:1", "铅-钢中子反射器", "Lead-Steel Neutron Reflector", 0.25, 0.5},
+        {"contenttweaker:cf_neutron_multiplier", "锎中子反射器（增殖器）", "Neutron Reflector-Multiplier", 0.65, 1.65},
+        {"contenttweaker:gold_reflector", "金-碳中子反射器", "Gold-Carbon Neutron Reflector", 0.6, 0.8},
     };
     return data;
 }

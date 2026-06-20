@@ -25,6 +25,7 @@ constexpr int kWaterSink = 0;
 constexpr int kIronSink = 1;
 constexpr int kLeadSink = 17;
 constexpr int kLiquidOxygenSink = 66;
+constexpr double kActivationFluxEpsilon = 1e-9;
 constexpr ImproveOptions kIrradiatorImproveOptions{1, 1, 64};
 constexpr CoolingExpansionOptions kIrradiatorCoolingExpansionOptions{12, 2, 192, 3, 192, 64, 64, 3};
 
@@ -43,6 +44,13 @@ struct ActivationLine {
 struct ActivationPlan {
     std::vector<ActivationLine> lines;
     double reflectedFlux = 0.0;
+};
+
+struct ActivationSearchContext {
+    const Fuel* fuel = nullptr;
+    std::vector<std::vector<ActivationLine>> optionsByDirection;
+    std::vector<double> remainingMaxFlux;
+    const std::atomic_bool* cancelRequested = nullptr;
 };
 
 struct FixedIrradiatorSkeleton {
@@ -201,6 +209,10 @@ std::vector<ActivationLine> activationLineOptionsForDirection(const Fuel& fuel, 
     std::vector<ActivationLine> options;
     const int moderatorTypeCount = static_cast<int>(moderatorTypes().size());
     const int reflectorTypeCount = static_cast<int>(reflectorTypes().size());
+    options.reserve(static_cast<size_t>(reflectorTypeCount) *
+                    (static_cast<size_t>(moderatorTypeCount) +
+                     static_cast<size_t>(moderatorTypeCount) *
+                         static_cast<size_t>(moderatorTypeCount + 1) / 2));
 
     for (int firstModerator = 0; firstModerator < moderatorTypeCount; ++firstModerator) {
         for (int reflectorType = 0; reflectorType < reflectorTypeCount; ++reflectorType) {
@@ -285,11 +297,68 @@ bool betterActivationPlan(const ActivationPlan& candidate, const ActivationPlan&
     return activationPlanKeyLess(candidate, best);
 }
 
-void chooseActivationPlanRecursive(const Fuel& fuel, const std::vector<int>& directions, size_t directionOffset,
+bool partialActivationPlanCannotBeatBest(const ActivationPlan& current, const ActivationPlan& best) {
+    if (current.lines.size() > best.lines.size()) {
+        return true;
+    }
+    if (current.lines.size() < best.lines.size()) {
+        return false;
+    }
+    if (current.reflectedFlux > best.reflectedFlux + kActivationFluxEpsilon) {
+        return true;
+    }
+    if (std::abs(current.reflectedFlux - best.reflectedFlux) <= kActivationFluxEpsilon &&
+        activationModeratorCount(current) > activationModeratorCount(best)) {
+        return true;
+    }
+    return false;
+}
+
+ActivationSearchContext makeActivationSearchContext(const Fuel& fuel, int fuelDirectionIndex,
+                                                    const std::atomic_bool* cancelRequested) {
+    ActivationSearchContext search;
+    search.fuel = &fuel;
+    search.cancelRequested = cancelRequested;
+
+    const std::vector<int> directions = activationDirectionsForFuel(fuelDirectionIndex);
+    search.optionsByDirection.reserve(directions.size());
+    for (int direction : directions) {
+        throwIfCancelled(cancelRequested);
+        search.optionsByDirection.push_back(activationLineOptionsForDirection(fuel, direction));
+    }
+
+    search.remainingMaxFlux.assign(search.optionsByDirection.size() + 1, 0.0);
+    for (size_t offset = search.optionsByDirection.size(); offset > 0; --offset) {
+        const std::vector<ActivationLine>& options = search.optionsByDirection.at(offset - 1);
+        const double maxFlux = options.empty() ? 0.0 : std::max(0.0, options.back().reflectedFlux);
+        search.remainingMaxFlux.at(offset - 1) = search.remainingMaxFlux.at(offset) + maxFlux;
+    }
+    return search;
+}
+
+void chooseActivationPlanRecursive(const ActivationSearchContext& search, size_t directionOffset,
                                    ActivationPlan& current, std::optional<ActivationPlan>& best) {
-    if (directionOffset >= directions.size()) {
-        if (current.reflectedFlux + 1e-9 < fuel.criticality ||
-            current.reflectedFlux > 2.0 * fuel.criticality + 1e-9) {
+    throwIfCancelled(search.cancelRequested);
+    const Fuel& fuel = *search.fuel;
+    const double maxAllowedFlux = 2.0 * fuel.criticality;
+    if (current.reflectedFlux > maxAllowedFlux + kActivationFluxEpsilon) {
+        return;
+    }
+    if (current.reflectedFlux + search.remainingMaxFlux.at(directionOffset) + kActivationFluxEpsilon <
+        fuel.criticality) {
+        return;
+    }
+    if (best.has_value() && partialActivationPlanCannotBeatBest(current, *best)) {
+        return;
+    }
+    if (best.has_value() && current.lines.size() == best->lines.size() &&
+        current.reflectedFlux + kActivationFluxEpsilon < fuel.criticality) {
+        return;
+    }
+
+    if (directionOffset >= search.optionsByDirection.size()) {
+        if (current.reflectedFlux + kActivationFluxEpsilon < fuel.criticality ||
+            current.reflectedFlux > maxAllowedFlux + kActivationFluxEpsilon) {
             return;
         }
         if (!best.has_value() || betterActivationPlan(current, *best)) {
@@ -298,25 +367,32 @@ void chooseActivationPlanRecursive(const Fuel& fuel, const std::vector<int>& dir
         return;
     }
 
-    chooseActivationPlanRecursive(fuel, directions, directionOffset + 1, current, best);
+    chooseActivationPlanRecursive(search, directionOffset + 1, current, best);
+    if (best.has_value() && current.lines.size() >= best->lines.size()) {
+        return;
+    }
 
-    const std::vector<ActivationLine> options =
-        activationLineOptionsForDirection(fuel, directions.at(directionOffset));
+    const std::vector<ActivationLine>& options = search.optionsByDirection.at(directionOffset);
     for (const ActivationLine& line : options) {
+        throwIfCancelled(search.cancelRequested);
+        if (current.reflectedFlux + line.reflectedFlux > maxAllowedFlux + kActivationFluxEpsilon) {
+            break;
+        }
         current.lines.push_back(line);
         current.reflectedFlux += line.reflectedFlux;
-        chooseActivationPlanRecursive(fuel, directions, directionOffset + 1, current, best);
+        chooseActivationPlanRecursive(search, directionOffset + 1, current, best);
         current.reflectedFlux -= line.reflectedFlux;
         current.lines.pop_back();
     }
 }
 
-std::optional<ActivationPlan> chooseActivationPlanForFuel(int fuelIndex, int fuelDirectionIndex) {
+std::optional<ActivationPlan> chooseActivationPlanForFuel(int fuelIndex, int fuelDirectionIndex,
+                                                          const std::atomic_bool* cancelRequested) {
     const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
-    const std::vector<int> directions = activationDirectionsForFuel(fuelDirectionIndex);
+    ActivationSearchContext search = makeActivationSearchContext(fuel, fuelDirectionIndex, cancelRequested);
     ActivationPlan current;
     std::optional<ActivationPlan> best;
-    chooseActivationPlanRecursive(fuel, directions, 0, current, best);
+    chooseActivationPlanRecursive(search, 0, current, best);
     return best;
 }
 
@@ -395,7 +471,7 @@ std::optional<Pos> findSourceForFuel(const Grid& grid, const FixedIrradiatorSkel
     return std::nullopt;
 }
 
-FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request) {
+FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std::atomic_bool* cancelRequested) {
     if (request.fuelIndices.size() != kSourceDirections.size()) {
         throw std::invalid_argument("中心辐照仓模式需要 6 个燃料单元。");
     }
@@ -409,6 +485,7 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request) {
     skeleton.fuelPositions.resize(kSourceDirections.size());
     skeleton.activations.resize(kSourceDirections.size());
     for (int directionIndex = 0; directionIndex < static_cast<int>(kSourceDirections.size()); ++directionIndex) {
+        throwIfCancelled(cancelRequested);
         const Direction& dir = kSourceDirections.at(static_cast<size_t>(directionIndex));
         for (int distance = 1; distance <= 4; ++distance) {
             if (!addFixedBlock(skeleton, offset(center, dir, distance),
@@ -424,7 +501,8 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request) {
             throw std::runtime_error("六方向燃料单元骨架发生方块冲突。");
         }
 
-        std::optional<ActivationPlan> activation = chooseActivationPlanForFuel(fuelIndex, directionIndex);
+        std::optional<ActivationPlan> activation =
+            chooseActivationPlanForFuel(fuelIndex, directionIndex, cancelRequested);
         if (!activation.has_value()) {
             std::ostringstream os;
             const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
@@ -536,7 +614,7 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
                                                    const std::atomic_bool* cancelRequested) {
     NCFR_PERF_COUNT(finalizeCandidateCalls);
     throwIfCancelled(cancelRequested);
-    FixedIrradiatorSkeleton skeleton = buildBaseSkeleton(request);
+    FixedIrradiatorSkeleton skeleton = buildBaseSkeleton(request, cancelRequested);
     Grid grid = buildIrradiatorSkeletonGrid(request, skeleton);
 
     FuelSimulation sim = simulateMixedFuel(grid);

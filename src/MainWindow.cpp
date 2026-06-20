@@ -838,7 +838,7 @@ QWidget* MainWindow::createLegendPanel() {
         {QString::fromUtf8("燃料"), ncfr::BlockKind::FuelCell},
         {QString::fromUtf8("减速剂"), ncfr::BlockKind::Moderator},
         {QString::fromUtf8("反射器"), ncfr::BlockKind::Reflector},
-        {QString::fromUtf8("辐照器"), ncfr::BlockKind::Irradiator},
+        {QString::fromUtf8("裂变中子辐照器"), ncfr::BlockKind::Irradiator},
         {QString::fromUtf8("散热器"), ncfr::BlockKind::Sink},
     };
 
@@ -958,7 +958,7 @@ void MainWindow::generateLayout(const FuelInputControls& controls) {
     QThread* thread = QThread::create([this, request = std::move(request), cancelFlag]() {
         try {
             if (ncfr::fuels().size() != 135 || ncfr::sinkTypes().size() != 86 ||
-                ncfr::moderatorTypes().size() != 3 || ncfr::reflectorTypes().size() != 2 ||
+                ncfr::moderatorTypes().size() != 6 || ncfr::reflectorTypes().size() != 4 ||
                 ncfr::sourceTypes().size() != 3 || ncfr::shieldTypes().size() != 2 ||
                 ncfr::irradiatorRecipeTypes().size() != 3) {
                 throw std::runtime_error(QString::fromUtf8("嵌入数据数量与工作表预期不一致。").toStdString());
