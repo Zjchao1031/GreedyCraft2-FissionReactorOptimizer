@@ -20,6 +20,7 @@ constexpr int kIrradiatorCenter = 9;
 constexpr int kHeavyWaterModerator = 2;
 constexpr int kBeCReflector = 0;
 constexpr int kLeadSteelReflector = 1;
+constexpr int kCaliforniumNeutronReflector = 2;
 constexpr int kAnySource = -1;
 constexpr int kWaterSink = 0;
 constexpr int kIronSink = 1;
@@ -205,7 +206,8 @@ std::vector<int> activationDirectionsForFuel(int fuelDirectionIndex) {
     return directions;
 }
 
-std::vector<ActivationLine> activationLineOptionsForDirection(const Fuel& fuel, int directionIndex) {
+std::vector<ActivationLine> activationLineOptionsForDirection(const Fuel& fuel, int directionIndex,
+                                                              bool disableCaliforniumNeutronReflector) {
     std::vector<ActivationLine> options;
     const int moderatorTypeCount = static_cast<int>(moderatorTypes().size());
     const int reflectorTypeCount = static_cast<int>(reflectorTypes().size());
@@ -216,6 +218,10 @@ std::vector<ActivationLine> activationLineOptionsForDirection(const Fuel& fuel, 
 
     for (int firstModerator = 0; firstModerator < moderatorTypeCount; ++firstModerator) {
         for (int reflectorType = 0; reflectorType < reflectorTypeCount; ++reflectorType) {
+            if (disableCaliforniumNeutronReflector &&
+                reflectorType == kCaliforniumNeutronReflector) {
+                continue;
+            }
             ActivationLine line;
             line.directionIndex = directionIndex;
             line.moderatorTypes = {firstModerator};
@@ -228,6 +234,10 @@ std::vector<ActivationLine> activationLineOptionsForDirection(const Fuel& fuel, 
     for (int firstModerator = 0; firstModerator < moderatorTypeCount; ++firstModerator) {
         for (int secondModerator = firstModerator; secondModerator < moderatorTypeCount; ++secondModerator) {
             for (int reflectorType = 0; reflectorType < reflectorTypeCount; ++reflectorType) {
+                if (disableCaliforniumNeutronReflector &&
+                    reflectorType == kCaliforniumNeutronReflector) {
+                    continue;
+                }
                 ActivationLine line;
                 line.directionIndex = directionIndex;
                 line.moderatorTypes = {firstModerator, secondModerator};
@@ -315,6 +325,7 @@ bool partialActivationPlanCannotBeatBest(const ActivationPlan& current, const Ac
 }
 
 ActivationSearchContext makeActivationSearchContext(const Fuel& fuel, int fuelDirectionIndex,
+                                                    bool disableCaliforniumNeutronReflector,
                                                     const std::atomic_bool* cancelRequested) {
     ActivationSearchContext search;
     search.fuel = &fuel;
@@ -324,7 +335,8 @@ ActivationSearchContext makeActivationSearchContext(const Fuel& fuel, int fuelDi
     search.optionsByDirection.reserve(directions.size());
     for (int direction : directions) {
         throwIfCancelled(cancelRequested);
-        search.optionsByDirection.push_back(activationLineOptionsForDirection(fuel, direction));
+        search.optionsByDirection.push_back(
+            activationLineOptionsForDirection(fuel, direction, disableCaliforniumNeutronReflector));
     }
 
     search.remainingMaxFlux.assign(search.optionsByDirection.size() + 1, 0.0);
@@ -387,9 +399,12 @@ void chooseActivationPlanRecursive(const ActivationSearchContext& search, size_t
 }
 
 std::optional<ActivationPlan> chooseActivationPlanForFuel(int fuelIndex, int fuelDirectionIndex,
+                                                          bool disableCaliforniumNeutronReflector,
                                                           const std::atomic_bool* cancelRequested) {
     const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
-    ActivationSearchContext search = makeActivationSearchContext(fuel, fuelDirectionIndex, cancelRequested);
+    ActivationSearchContext search =
+        makeActivationSearchContext(fuel, fuelDirectionIndex, disableCaliforniumNeutronReflector,
+                                    cancelRequested);
     ActivationPlan current;
     std::optional<ActivationPlan> best;
     chooseActivationPlanRecursive(search, 0, current, best);
@@ -502,7 +517,8 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
         }
 
         std::optional<ActivationPlan> activation =
-            chooseActivationPlanForFuel(fuelIndex, directionIndex, cancelRequested);
+            chooseActivationPlanForFuel(fuelIndex, directionIndex,
+                                        request.disableCaliforniumNeutronReflector, cancelRequested);
         if (!activation.has_value()) {
             std::ostringstream os;
             const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));

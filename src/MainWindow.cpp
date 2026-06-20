@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -500,6 +501,7 @@ QJsonObject requestToJson(const ncfr::BuildRequest& request) {
     return {
         {QStringLiteral("fuelCells"), selectedFuelsToJson(request)},
         {QStringLiteral("sourceCount"), ncfr::requiredSourceCount(request)},
+        {QStringLiteral("disableCaliforniumNeutronReflector"), request.disableCaliforniumNeutronReflector},
     };
 }
 
@@ -685,7 +687,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 "1.中子源由非自启动燃料单元自动决定，生成方案统一显示为“任意中子源”。\n"
                 "2.普通结构生成支持 1、2、4 个燃料单元；辐照结构生成固定为一个中心辐照仓和六个燃料单元。\n"
                 "3.两个生成区域互相独立，每次点击一个区域内的生成方案按钮。\n"
-                "4.使用过程产生任何问题请在贪婪2交流1、4群@Atopts.\n"));
+                "4.在生成的结构内点击燃料单元，可以将此燃料替换成其他燃料，替换失败会说明原因。\n"
+                "5.使用过程产生任何问题请在贪婪2交流1、4群@Atopts.\n"));
     });
 }
 
@@ -757,6 +760,16 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
     controls.generateButton->setMinimumWidth(112);
     topLayout->addWidget(controls.generateButton);
     rootLayout->addLayout(topLayout);
+
+    if (fixedFuelCellCount == 6) {
+        controls.disableCaliforniumReflectorCheck =
+            new QCheckBox(QString::fromUtf8("禁用锎中子反射器"), group);
+        controls.disableCaliforniumReflectorCheck->setToolTip(
+            QString::fromUtf8("勾选后，辐照结构生成不会使用锎中子反射器（增殖器）。"));
+        rootLayout->addWidget(controls.disableCaliforniumReflectorCheck);
+    } else {
+        controls.disableCaliforniumReflectorCheck = nullptr;
+    }
 
     auto* fuelGroup = new QGroupBox(QString::fromUtf8("燃料单元"), group);
     controls.fuelRowsLayout = new QVBoxLayout(fuelGroup);
@@ -931,6 +944,10 @@ ncfr::BuildRequest MainWindow::buildRequestFromUi(const FuelInputControls& contr
             throw std::runtime_error("请选择每个燃料单元的燃料。");
         }
         request.fuelIndices.push_back(combo->currentData().toInt());
+    }
+    if (controls.disableCaliforniumReflectorCheck != nullptr) {
+        request.disableCaliforniumNeutronReflector =
+            controls.disableCaliforniumReflectorCheck->isChecked();
     }
     return request;
 }

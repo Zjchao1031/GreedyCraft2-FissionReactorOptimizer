@@ -12,6 +12,7 @@ namespace ncfr {
 
 struct BuildRequest {
     std::vector<int> fuelIndices;
+    bool disableCaliforniumNeutronReflector = false;
 };
 
 class OptimizationCanceled : public std::exception {

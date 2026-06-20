@@ -15,6 +15,7 @@ class QDialog;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
+class QCheckBox;
 class QPushButton;
 class QString;
 class QSpinBox;
@@ -39,6 +40,7 @@ private:
         QVBoxLayout* fuelRowsLayout = nullptr;
         std::vector<QComboBox*> fuelFamilyCombos;
         std::vector<QComboBox*> fuelCombos;
+        QCheckBox* disableCaliforniumReflectorCheck = nullptr;
         QPushButton* generateButton = nullptr;
         int fixedFuelCellCount = 0;
     };
