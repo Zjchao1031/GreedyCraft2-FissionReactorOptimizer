@@ -322,6 +322,8 @@ QString blockKindKey(ncfr::BlockKind kind) {
         return QStringLiteral("shield");
     case ncfr::BlockKind::Irradiator:
         return QStringLiteral("irradiator");
+    case ncfr::BlockKind::Conductor:
+        return QStringLiteral("conductor");
     case ncfr::BlockKind::Sink:
         return QStringLiteral("sink");
     }
@@ -330,17 +332,17 @@ QString blockKindKey(ncfr::BlockKind kind) {
 
 QJsonObject sizeToJson(const ncfr::Grid& grid) {
     return {
-        {QStringLiteral("length"), grid.internalA()},
-        {QStringLiteral("width"), grid.internalB()},
-        {QStringLiteral("height"), grid.internalC()},
+        {QStringLiteral("x"), grid.internalA()},
+        {QStringLiteral("y"), grid.internalC()},
+        {QStringLiteral("z"), grid.internalB()},
     };
 }
 
 QJsonObject fullSizeToJson(const ncfr::Grid& grid) {
     return {
-        {QStringLiteral("width"), grid.width()},
-        {QStringLiteral("height"), grid.height()},
-        {QStringLiteral("depth"), grid.depth()},
+        {QStringLiteral("x"), grid.width()},
+        {QStringLiteral("y"), grid.depth()},
+        {QStringLiteral("z"), grid.height()},
     };
 }
 
@@ -366,7 +368,7 @@ QJsonObject fuelToJson(int fuelIndex) {
 
 QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
     QJsonObject typedData;
-    if (block.type < 0) {
+    if (block.type < 0 && block.kind != ncfr::BlockKind::Conductor) {
         return typedData;
     }
 
@@ -454,6 +456,11 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
         typedData.insert(QStringLiteral("efficiency"), recipe.efficiency);
         break;
     }
+    case ncfr::BlockKind::Conductor:
+        typedData.insert(QStringLiteral("registryName"), QStringLiteral("nuclearcraft:fission_conductor"));
+        typedData.insert(QStringLiteral("nameZh"), QString::fromUtf8("裂变反应堆导体"));
+        typedData.insert(QStringLiteral("nameEn"), QStringLiteral("Fission Reactor Conductor"));
+        break;
     case ncfr::BlockKind::Sink: {
         const ncfr::SinkType& sink = ncfr::sinkTypes().at(static_cast<size_t>(block.type));
         typedData.insert(QStringLiteral("index"), sink.index);
@@ -475,8 +482,8 @@ QJsonObject blockToJson(const ncfr::Grid& grid, int x, int y, int z) {
     const ncfr::Block& block = grid.at(x, y, z);
     QJsonObject object{
         {QStringLiteral("x"), x},
-        {QStringLiteral("y"), y},
-        {QStringLiteral("z"), z},
+        {QStringLiteral("y"), z + 1},
+        {QStringLiteral("z"), y},
         {QStringLiteral("kind"), blockKindKey(block.kind)},
         {QStringLiteral("type"), block.type},
         {QStringLiteral("displayName"), fromUtf8String(ncfr::blockDisplayName(block))},
@@ -517,14 +524,14 @@ QJsonObject gridToJson(const ncfr::Grid& grid) {
             rows.append(row);
         }
         layers.append(QJsonObject{
-            {QStringLiteral("z"), z},
+            {QStringLiteral("y"), z + 1},
             {QStringLiteral("rows"), rows},
         });
     }
 
     return {
         {QStringLiteral("coordinateSystem"),
-         QString::fromUtf8("外部网格零基坐标；边界坐标为外壳，内部坐标范围为 1..内部尺寸。")},
+         QString::fromUtf8("坐标与二维分层方案一致：x 为横向列，y 为层号，z 为纵向行；x/z 从 0 开始，y 从 1 开始。")},
         {QStringLiteral("layers"), layers},
     };
 }
@@ -540,7 +547,7 @@ QJsonDocument resultToJsonDocument(const ncfr::OptimizationResult& result) {
 
     return QJsonDocument(QJsonObject{
         {QStringLiteral("schema"), QStringLiteral("nuclearcraft-fission-reactor-result")},
-        {QStringLiteral("schemaVersion"), 4},
+        {QStringLiteral("schemaVersion"), 5},
         {QStringLiteral("request"), requestToJson(result.request)},
         {QStringLiteral("internalSize"), sizeToJson(result.grid)},
         {QStringLiteral("externalSize"), fullSizeToJson(result.grid)},
@@ -683,9 +690,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 "请在使用本工具前仔细阅读以下注意事项：\n"
                 "0.本工具分为两个功能：\n"
                 "   普通结构生成:选择燃料单元的数量和燃料种类，输出可行的反应堆设计方案。\n"
-                "   辐照结构生成:选择六种燃料，生成带辐照仓且运行速率最大的反应堆设计方案。\n"
+                "   辐照结构生成:选择五个燃料单元的燃料，生成带辐照仓且运行速率最大的反应堆设计方案。\n"
                 "1.中子源由非自启动燃料单元自动决定，生成方案统一显示为“任意中子源”。\n"
-                "2.普通结构生成支持 1、2、4 个燃料单元；辐照结构生成固定为一个中心辐照仓和六个燃料单元。\n"
+                "2.普通结构生成支持 1、2、4 个燃料单元；辐照结构生成固定为一个中心辐照仓和五个燃料单元。\n"
                 "3.两个生成区域互相独立，每次点击一个区域内的生成方案按钮。\n"
                 "4.在生成的结构内点击燃料单元，可以将此燃料替换成其他燃料，替换失败会说明原因。\n"
                 "5.使用过程产生任何问题请在贪婪2交流1、4群@Atopts.\n"));
@@ -714,7 +721,7 @@ QWidget* MainWindow::createInputPanel() {
     auto* inputLayout = new QHBoxLayout();
     inputLayout->setSpacing(10);
     inputLayout->addWidget(createFuelInputPanel(QString::fromUtf8("普通结构生成"), normalInput_, panel, {1, 2, 4}, 0));
-    inputLayout->addWidget(createFuelInputPanel(QString::fromUtf8("辐照结构生成"), irradiatorInput_, panel, {}, 6));
+    inputLayout->addWidget(createFuelInputPanel(QString::fromUtf8("辐照结构生成"), irradiatorInput_, panel, {}, 5));
     rootLayout->addLayout(inputLayout);
 
     auto* exportLayout = new QHBoxLayout();
@@ -761,7 +768,7 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
     topLayout->addWidget(controls.generateButton);
     rootLayout->addLayout(topLayout);
 
-    if (fixedFuelCellCount == 6) {
+    if (fixedFuelCellCount == 5) {
         controls.disableCaliforniumReflectorCheck =
             new QCheckBox(QString::fromUtf8("禁用锎中子反射器"), group);
         controls.disableCaliforniumReflectorCheck->setToolTip(
@@ -852,6 +859,7 @@ QWidget* MainWindow::createLegendPanel() {
         {QString::fromUtf8("减速剂"), ncfr::BlockKind::Moderator},
         {QString::fromUtf8("反射器"), ncfr::BlockKind::Reflector},
         {QString::fromUtf8("裂变中子辐照器"), ncfr::BlockKind::Irradiator},
+        {QString::fromUtf8("导体"), ncfr::BlockKind::Conductor},
         {QString::fromUtf8("散热器"), ncfr::BlockKind::Sink},
     };
 

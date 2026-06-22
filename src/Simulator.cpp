@@ -200,6 +200,8 @@ bool isConductor(const Grid& grid, int idx, const StateVector& running, const St
         return functionalShields.at(static_cast<size_t>(idx));
     case BlockKind::Irradiator:
         return functionalIrradiators.at(static_cast<size_t>(idx));
+    case BlockKind::Conductor:
+        return true;
     default:
         return false;
     }

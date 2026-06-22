@@ -310,7 +310,7 @@ bool matchesTarget(const Grid& grid, int idx, RuleTarget target, int sinkType, c
     case RuleTarget::Irradiator:
         return block.kind == BlockKind::Irradiator && stateAt(context.functionalIrradiators, idx);
     case RuleTarget::Conductor:
-        return false;
+        return block.kind == BlockKind::Conductor;
     case RuleTarget::Casing:
         return isCasingLike(block.kind);
     case RuleTarget::AnySink:

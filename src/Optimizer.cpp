@@ -86,7 +86,7 @@ const OptimizationStrategy& selectStrategy(const BuildRequest& request) {
     if (request.fuelIndices.size() == 4) {
         return quadFuelStrategy;
     }
-    if (request.fuelIndices.size() == 6) {
+    if (request.fuelIndices.size() == 5) {
         return sixFuelIrradiatorStrategy;
     }
     return unimplementedStrategy;

@@ -132,6 +132,8 @@ QColor ReactorGridWidget::colorForKind(ncfr::BlockKind kind) {
         return QColor("#7C3AED");
     case ncfr::BlockKind::Irradiator:
         return QColor("#BE185D");
+    case ncfr::BlockKind::Conductor:
+        return QColor("#64748B");
     case ncfr::BlockKind::Sink:
         return QColor("#2563EB");
     }

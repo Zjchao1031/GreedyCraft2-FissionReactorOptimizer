@@ -22,6 +22,7 @@ enum class BlockKind {
     Reflector,
     Shield,
     Irradiator,
+    Conductor,
     Sink
 };
 

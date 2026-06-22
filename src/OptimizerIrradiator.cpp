@@ -17,6 +17,7 @@ namespace {
 
 constexpr int kIrradiatorInteriorSize = 17;
 constexpr int kIrradiatorCenter = 9;
+constexpr int kIrradiatorFuelInputCount = 5;
 constexpr int kHeavyWaterModerator = 2;
 constexpr int kBeCReflector = 0;
 constexpr int kLeadSteelReflector = 1;
@@ -29,6 +30,7 @@ constexpr int kLiquidOxygenSink = 66;
 constexpr double kActivationFluxEpsilon = 1e-9;
 constexpr ImproveOptions kIrradiatorImproveOptions{1, 1, 64};
 constexpr CoolingExpansionOptions kIrradiatorCoolingExpansionOptions{12, 2, 192, 3, 192, 64, 64, 3};
+constexpr Direction kIrradiatorWallBridgeDirection{0, 0, -1};
 
 struct FixedBlock {
     Pos pos;
@@ -90,6 +92,15 @@ bool sameBlock(const Block& lhs, const Block& rhs) {
 
 bool samePosition(const Pos& lhs, const Pos& rhs) {
     return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
+}
+
+bool sameDirection(const Direction& lhs, const Direction& rhs) {
+    return lhs.dx == rhs.dx && lhs.dy == rhs.dy && lhs.dz == rhs.dz;
+}
+
+bool isIrradiatorWallBridgeDirection(int directionIndex) {
+    return sameDirection(kSourceDirections.at(static_cast<size_t>(directionIndex)),
+                         kIrradiatorWallBridgeDirection);
 }
 
 bool isFixedInteriorPosition(const FixedIrradiatorSkeleton& skeleton, const Pos& pos) {
@@ -487,8 +498,10 @@ std::optional<Pos> findSourceForFuel(const Grid& grid, const FixedIrradiatorSkel
 }
 
 FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std::atomic_bool* cancelRequested) {
-    if (request.fuelIndices.size() != kSourceDirections.size()) {
-        throw std::invalid_argument("中心辐照仓模式需要 6 个燃料单元。");
+    if (request.fuelIndices.size() != kIrradiatorFuelInputCount) {
+        std::ostringstream os;
+        os << "中心辐照仓模式需要 " << kIrradiatorFuelInputCount << " 个燃料单元。";
+        throw std::invalid_argument(os.str());
     }
 
     FixedIrradiatorSkeleton skeleton;
@@ -499,9 +512,17 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
 
     skeleton.fuelPositions.resize(kSourceDirections.size());
     skeleton.activations.resize(kSourceDirections.size());
+    size_t fuelInputIndex = 0;
     for (int directionIndex = 0; directionIndex < static_cast<int>(kSourceDirections.size()); ++directionIndex) {
         throwIfCancelled(cancelRequested);
         const Direction& dir = kSourceDirections.at(static_cast<size_t>(directionIndex));
+        if (isIrradiatorWallBridgeDirection(directionIndex)) {
+            if (!addFixedBlock(skeleton, offset(center, dir, 1), {BlockKind::Conductor, -1})) {
+                throw std::runtime_error("中心辐照仓导体连接骨架发生方块冲突。");
+            }
+            continue;
+        }
+
         for (int distance = 1; distance <= 4; ++distance) {
             if (!addFixedBlock(skeleton, offset(center, dir, distance),
                                {BlockKind::Moderator, kHeavyWaterModerator})) {
@@ -509,11 +530,11 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
             }
         }
 
-        const int fuelIndex = request.fuelIndices.at(static_cast<size_t>(directionIndex));
+        const int fuelIndex = request.fuelIndices.at(fuelInputIndex++);
         const Pos fuelPos = offset(center, dir, 5);
         skeleton.fuelPositions.at(static_cast<size_t>(directionIndex)) = fuelPos;
         if (!addFixedBlock(skeleton, fuelPos, {BlockKind::FuelCell, fuelIndex})) {
-            throw std::runtime_error("六方向燃料单元骨架发生方块冲突。");
+            throw std::runtime_error("中心辐照仓燃料单元骨架发生方块冲突。");
         }
 
         std::optional<ActivationPlan> activation =
@@ -556,8 +577,13 @@ Grid buildIrradiatorSkeletonGrid(const BuildRequest& request, FixedIrradiatorSke
         throw std::runtime_error("无法恢复中心辐照仓固定骨架。");
     }
 
+    size_t fuelInputIndex = 0;
     for (int directionIndex = 0; directionIndex < static_cast<int>(kSourceDirections.size()); ++directionIndex) {
-        const int fuelIndex = request.fuelIndices.at(static_cast<size_t>(directionIndex));
+        if (isIrradiatorWallBridgeDirection(directionIndex)) {
+            continue;
+        }
+
+        const int fuelIndex = request.fuelIndices.at(fuelInputIndex++);
         const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
         if (fuel.selfPriming) {
             continue;
@@ -586,7 +612,8 @@ Grid buildIrradiatorSkeletonGrid(const BuildRequest& request, FixedIrradiatorSke
 void requireSixFuelIrradiatorState(const Grid& grid, const FuelSimulation& sim, const char* stage) {
     if (!isPreCompactRunnable(sim)) {
         std::ostringstream os;
-        os << "中心辐照仓方案在 " << stage << " 阶段无法让 6 个燃料全部运行（运行 "
+        os << "中心辐照仓方案在 " << stage << " 阶段无法让 " << kIrradiatorFuelInputCount
+           << " 个燃料全部运行（运行 "
            << sim.runningCells << "/" << sim.fuelCells << "）。";
         throw std::runtime_error(os.str());
     }

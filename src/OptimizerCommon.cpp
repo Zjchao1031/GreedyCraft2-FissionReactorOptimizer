@@ -248,8 +248,8 @@ void validateRequest(const BuildRequest& request) {
         throw std::invalid_argument("燃料单元数量至少为 1。");
     }
     if (request.fuelIndices.size() != 1 && request.fuelIndices.size() != 2 &&
-        request.fuelIndices.size() != 4 && request.fuelIndices.size() != 6) {
-        throw std::invalid_argument("燃料单元数量只能为 1、2、4 或 6。");
+        request.fuelIndices.size() != 4 && request.fuelIndices.size() != 5) {
+        throw std::invalid_argument("燃料单元数量只能为 1、2、4 或 5。");
     }
     for (int index : request.fuelIndices) {
         validateIndex(index, static_cast<int>(fuels().size()), "燃料");
@@ -590,6 +590,103 @@ bool hasNoEmptyInteriorPlane(const Grid& grid) {
     return true;
 }
 
+Grid compactEmptyInteriorPlanes(Grid grid) {
+    NCFR_PERF_COUNT(compactInteriorPlanesCalls);
+    NCFR_PERF_SCOPE(compactInteriorPlanesNs);
+
+    std::vector<bool> keepX(static_cast<size_t>(grid.internalA() + 1), false);
+    std::vector<bool> keepY(static_cast<size_t>(grid.internalB() + 1), false);
+    std::vector<bool> keepZ(static_cast<size_t>(grid.internalC() + 1), false);
+
+    for (const Pos& pos : grid.interiorPositions()) {
+        if (grid.at(pos.x, pos.y, pos.z).kind == BlockKind::Empty) {
+            continue;
+        }
+        keepX.at(static_cast<size_t>(pos.x)) = true;
+        keepY.at(static_cast<size_t>(pos.y)) = true;
+        keepZ.at(static_cast<size_t>(pos.z)) = true;
+    }
+
+    const int newA = static_cast<int>(std::count(keepX.begin(), keepX.end(), true));
+    const int newB = static_cast<int>(std::count(keepY.begin(), keepY.end(), true));
+    const int newC = static_cast<int>(std::count(keepZ.begin(), keepZ.end(), true));
+    if (newA <= 0 || newB <= 0 || newC <= 0 ||
+        (newA == grid.internalA() && newB == grid.internalB() && newC == grid.internalC())) {
+        return grid;
+    }
+
+    std::vector<int> mapX(static_cast<size_t>(grid.internalA() + 1), 0);
+    std::vector<int> mapY(static_cast<size_t>(grid.internalB() + 1), 0);
+    std::vector<int> mapZ(static_cast<size_t>(grid.internalC() + 1), 0);
+    for (int x = 1, next = 1; x <= grid.internalA(); ++x) {
+        if (keepX.at(static_cast<size_t>(x))) {
+            mapX.at(static_cast<size_t>(x)) = next++;
+        }
+    }
+    for (int y = 1, next = 1; y <= grid.internalB(); ++y) {
+        if (keepY.at(static_cast<size_t>(y))) {
+            mapY.at(static_cast<size_t>(y)) = next++;
+        }
+    }
+    for (int z = 1, next = 1; z <= grid.internalC(); ++z) {
+        if (keepZ.at(static_cast<size_t>(z))) {
+            mapZ.at(static_cast<size_t>(z)) = next++;
+        }
+    }
+
+    Grid compacted = makeShell(newA, newB, newC);
+    for (const Pos& pos : grid.interiorPositions()) {
+        const Block& block = grid.at(pos.x, pos.y, pos.z);
+        if (block.kind == BlockKind::Empty) {
+            continue;
+        }
+        compacted.at(mapX.at(static_cast<size_t>(pos.x)),
+                     mapY.at(static_cast<size_t>(pos.y)),
+                     mapZ.at(static_cast<size_t>(pos.z))) = block;
+    }
+
+    auto mappedCoordinate = [](int value, int oldInternalSize, int newInternalSize,
+                               const std::vector<bool>& keep,
+                               const std::vector<int>& map) -> std::optional<int> {
+        if (value == 0) {
+            return 0;
+        }
+        if (value == oldInternalSize + 1) {
+            return newInternalSize + 1;
+        }
+        if (value >= 1 && value <= oldInternalSize && keep.at(static_cast<size_t>(value))) {
+            return map.at(static_cast<size_t>(value));
+        }
+        return std::nullopt;
+    };
+
+    for (int z = 0; z < grid.depth(); ++z) {
+        for (int y = 0; y < grid.height(); ++y) {
+            for (int x = 0; x < grid.width(); ++x) {
+                if (!grid.isBoundary(x, y, z)) {
+                    continue;
+                }
+                const Block& block = grid.at(x, y, z);
+                if (block.kind != BlockKind::Source) {
+                    continue;
+                }
+                std::optional<int> compactedX =
+                    mappedCoordinate(x, grid.internalA(), compacted.internalA(), keepX, mapX);
+                std::optional<int> compactedY =
+                    mappedCoordinate(y, grid.internalB(), compacted.internalB(), keepY, mapY);
+                std::optional<int> compactedZ =
+                    mappedCoordinate(z, grid.internalC(), compacted.internalC(), keepZ, mapZ);
+                if (!compactedX.has_value() || !compactedY.has_value() || !compactedZ.has_value()) {
+                    continue;
+                }
+                compacted.at(*compactedX, *compactedY, *compactedZ) = block;
+            }
+        }
+    }
+
+    return compacted;
+}
+
 std::vector<Pos> fuelPositionsInGrid(const Grid& grid) {
     std::vector<Pos> positions;
     for (const Pos& pos : grid.interiorPositions()) {
@@ -887,14 +984,24 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
 }
 
 OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, const FuelSimulation& sim) {
-    addFuelCellPorts(grid, request);
-    addIrradiatorPort(grid);
-    OptimizationResult result(std::move(grid), request);
-    result.minCoolingMargin = sim.minClusterMargin;
+    FuelSimulation finalSim = sim;
+    const int originalInternalB = grid.internalB();
+    Grid finalGrid = compactEmptyInteriorPlanes(std::move(grid));
+    if (finalGrid.internalB() != originalInternalB) {
+        finalSim = simulateMixedFuel(finalGrid);
+        if (!isSafeOperatingSimulation(finalGrid, finalSim)) {
+            throw std::runtime_error("高度压缩后方案不再满足安全运行判定。");
+        }
+    }
+
+    addFuelCellPorts(finalGrid, request);
+    addIrradiatorPort(finalGrid);
+    OptimizationResult result(std::move(finalGrid), request);
+    result.minCoolingMargin = finalSim.minClusterMargin;
     result.usefulBlocks = countUsefulBlocks(result.grid);
-    result.disconnectedFunctionalBlocks = sim.disconnectedFunctionalBlocks;
-    result.functionalIrradiators = countFunctionalIrradiators(sim);
-    result.irradiatorFlux = totalIrradiatorFlux(sim);
+    result.disconnectedFunctionalBlocks = finalSim.disconnectedFunctionalBlocks;
+    result.functionalIrradiators = countFunctionalIrradiators(finalSim);
+    result.irradiatorFlux = totalIrradiatorFlux(finalSim);
     return result;
 }
 

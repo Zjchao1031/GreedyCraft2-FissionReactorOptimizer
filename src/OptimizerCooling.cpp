@@ -71,6 +71,8 @@ bool isCoolingExpansionAnchor(const Grid& grid, const FuelSimulation& sim, int i
         return sim.activeReflectors.at(static_cast<size_t>(idx));
     case BlockKind::Irradiator:
         return sim.functionalIrradiators.at(static_cast<size_t>(idx));
+    case BlockKind::Conductor:
+        return true;
     case BlockKind::Sink:
         return sim.validSinks.at(static_cast<size_t>(idx));
     case BlockKind::Shield:

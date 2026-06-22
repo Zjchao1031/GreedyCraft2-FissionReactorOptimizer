@@ -148,7 +148,8 @@ bool isCasingLike(BlockKind kind) {
 
 bool isFunctionalInterior(BlockKind kind) {
     return kind == BlockKind::FuelCell || kind == BlockKind::Moderator || kind == BlockKind::Reflector ||
-           kind == BlockKind::Shield || kind == BlockKind::Irradiator || kind == BlockKind::Sink;
+           kind == BlockKind::Shield || kind == BlockKind::Irradiator || kind == BlockKind::Conductor ||
+           kind == BlockKind::Sink;
 }
 
 std::string blockDisplayName(const Block& block) {
@@ -195,6 +196,8 @@ std::string blockDisplayName(const Block& block) {
         return shieldTypes().at(static_cast<size_t>(block.type)).nameZh;
     case BlockKind::Irradiator:
         return "裂变中子辐照器";
+    case BlockKind::Conductor:
+        return "裂变反应堆导体";
     case BlockKind::Sink:
         return sinkTypes().at(static_cast<size_t>(block.type)).nameZh;
     }
