@@ -739,28 +739,8 @@ QJsonDocument resultToJsonDocument(const ncfr::OptimizationResult& result) {
     });
 }
 
-QString findProjectDirectoryFrom(const QString& startPath) {
-    QDir dir(startPath);
-    if (QFileInfo(startPath).isFile()) {
-        dir = QFileInfo(startPath).absoluteDir();
-    }
-
-    while (true) {
-        if (QFileInfo::exists(dir.filePath(QStringLiteral("CMakeLists.txt")))) {
-            return dir.absolutePath();
-        }
-        if (!dir.cdUp()) {
-            return {};
-        }
-    }
-}
-
-QString findProjectDirectory() {
-    const QString fromCurrentPath = findProjectDirectoryFrom(QDir::currentPath());
-    if (!fromCurrentPath.isEmpty()) {
-        return fromCurrentPath;
-    }
-    return findProjectDirectoryFrom(QCoreApplication::applicationDirPath());
+QString resultExportDirectory() {
+    return QCoreApplication::applicationDirPath();
 }
 
 QString nextResultFilePath(const QString& directoryPath) {
@@ -1372,13 +1352,13 @@ void MainWindow::exportResultAsJson() {
         return;
     }
 
-    const QString projectDirectory = findProjectDirectory();
-    if (projectDirectory.isEmpty()) {
-        QMessageBox::critical(this, QString::fromUtf8("导出失败"), QString::fromUtf8("未找到 CMakeLists.txt 所在目录。"));
+    const QString exportDirectory = resultExportDirectory();
+    if (exportDirectory.isEmpty()) {
+        QMessageBox::critical(this, QString::fromUtf8("导出失败"), QString::fromUtf8("未找到程序所在目录。"));
         return;
     }
 
-    const QString filePath = nextResultFilePath(projectDirectory);
+    const QString filePath = nextResultFilePath(exportDirectory);
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly | QIODevice::Text)) {
         QMessageBox::critical(this, QString::fromUtf8("导出失败"), QString::fromUtf8("无法创建文件：%1").arg(filePath));
