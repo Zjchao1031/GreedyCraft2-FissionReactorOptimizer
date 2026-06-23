@@ -18,10 +18,6 @@ namespace {
 constexpr int kIrradiatorInteriorSize = 17;
 constexpr int kIrradiatorCenter = 9;
 constexpr int kIrradiatorFuelInputCount = 5;
-constexpr int kHeavyWaterModerator = 2;
-constexpr int kBeCReflector = 0;
-constexpr int kLeadSteelReflector = 1;
-constexpr int kCaliforniumNeutronReflector = 2;
 constexpr int kAnySource = -1;
 constexpr int kWaterSink = 0;
 constexpr int kIronSink = 1;
@@ -62,6 +58,7 @@ struct FixedIrradiatorSkeleton {
     std::vector<ActivationPlan> activations;
     std::vector<Pos> sourcePositions;
     std::vector<Pos> sourceTargets;
+    int sourceLineFallbackReflectorType = -1;
 };
 
 int oppositeDirectionIndex(int directionIndex) {
@@ -84,6 +81,39 @@ int wallConnectionPerpendicularDirectionIndex(int directionIndex) {
 std::string fuelCodeOrName(int fuelIndex) {
     const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
     return fuel.code.empty() ? fuel.nameZh : fuel.code;
+}
+
+int strongestSelectedModeratorType(const BuildRequest& request) {
+    int bestType = -1;
+    int bestFlux = -1;
+    for (int type : request.selectedModeratorTypeIndices) {
+        const int flux = moderatorTypes().at(static_cast<size_t>(type)).fluxFactor;
+        if (flux > bestFlux || (flux == bestFlux && (bestType < 0 || type < bestType))) {
+            bestType = type;
+            bestFlux = flux;
+        }
+    }
+    if (bestType < 0) {
+        throw std::invalid_argument("辐照结构生成需要至少选择一个减速剂。");
+    }
+    return bestType;
+}
+
+int bestWeakSelectedReflectorType(const BuildRequest& request) {
+    int bestType = -1;
+    double bestReflectivity = -1.0;
+    for (int type : request.selectedReflectorTypeIndices) {
+        const double reflectivity = reflectorTypes().at(static_cast<size_t>(type)).reflectivity;
+        if (reflectivity >= 1.0) {
+            continue;
+        }
+        if (reflectivity > bestReflectivity ||
+            (reflectivity == bestReflectivity && (bestType < 0 || type < bestType))) {
+            bestType = type;
+            bestReflectivity = reflectivity;
+        }
+    }
+    return bestType;
 }
 
 bool sameBlock(const Block& lhs, const Block& rhs) {
@@ -161,7 +191,11 @@ bool keepSourceLineOpen(Grid& grid, const FixedIrradiatorSkeleton& skeleton,
             if (isFixedInteriorPosition(skeleton, pos)) {
                 return false;
             }
-            block = {BlockKind::Reflector, kLeadSteelReflector};
+            if (skeleton.sourceLineFallbackReflectorType >= 0) {
+                block = {BlockKind::Reflector, skeleton.sourceLineFallbackReflectorType};
+            } else {
+                block = {BlockKind::Empty, -1};
+            }
         }
     }
     return false;
@@ -217,22 +251,16 @@ std::vector<int> activationDirectionsForFuel(int fuelDirectionIndex) {
     return directions;
 }
 
-std::vector<ActivationLine> activationLineOptionsForDirection(const Fuel& fuel, int directionIndex,
-                                                              bool disableCaliforniumNeutronReflector) {
+std::vector<ActivationLine> activationLineOptionsForDirection(
+    const Fuel& fuel, int directionIndex, const std::vector<int>& selectedModeratorTypes,
+    const std::vector<int>& selectedReflectorTypes) {
     std::vector<ActivationLine> options;
-    const int moderatorTypeCount = static_cast<int>(moderatorTypes().size());
-    const int reflectorTypeCount = static_cast<int>(reflectorTypes().size());
-    options.reserve(static_cast<size_t>(reflectorTypeCount) *
-                    (static_cast<size_t>(moderatorTypeCount) +
-                     static_cast<size_t>(moderatorTypeCount) *
-                         static_cast<size_t>(moderatorTypeCount + 1) / 2));
+    options.reserve(selectedReflectorTypes.size() *
+                    (selectedModeratorTypes.size() +
+                     selectedModeratorTypes.size() * (selectedModeratorTypes.size() + 1) / 2));
 
-    for (int firstModerator = 0; firstModerator < moderatorTypeCount; ++firstModerator) {
-        for (int reflectorType = 0; reflectorType < reflectorTypeCount; ++reflectorType) {
-            if (disableCaliforniumNeutronReflector &&
-                reflectorType == kCaliforniumNeutronReflector) {
-                continue;
-            }
+    for (int firstModerator : selectedModeratorTypes) {
+        for (int reflectorType : selectedReflectorTypes) {
             ActivationLine line;
             line.directionIndex = directionIndex;
             line.moderatorTypes = {firstModerator};
@@ -242,16 +270,15 @@ std::vector<ActivationLine> activationLineOptionsForDirection(const Fuel& fuel, 
         }
     }
 
-    for (int firstModerator = 0; firstModerator < moderatorTypeCount; ++firstModerator) {
-        for (int secondModerator = firstModerator; secondModerator < moderatorTypeCount; ++secondModerator) {
-            for (int reflectorType = 0; reflectorType < reflectorTypeCount; ++reflectorType) {
-                if (disableCaliforniumNeutronReflector &&
-                    reflectorType == kCaliforniumNeutronReflector) {
-                    continue;
-                }
+    for (size_t firstOffset = 0; firstOffset < selectedModeratorTypes.size(); ++firstOffset) {
+        for (size_t secondOffset = firstOffset; secondOffset < selectedModeratorTypes.size(); ++secondOffset) {
+            for (int reflectorType : selectedReflectorTypes) {
                 ActivationLine line;
                 line.directionIndex = directionIndex;
-                line.moderatorTypes = {firstModerator, secondModerator};
+                line.moderatorTypes = {
+                    selectedModeratorTypes.at(firstOffset),
+                    selectedModeratorTypes.at(secondOffset),
+                };
                 line.reflectorType = reflectorType;
                 line.reflectedFlux = reflectedFluxForActivationLine(fuel, line.moderatorTypes, reflectorType);
                 options.push_back(std::move(line));
@@ -336,7 +363,7 @@ bool partialActivationPlanCannotBeatBest(const ActivationPlan& current, const Ac
 }
 
 ActivationSearchContext makeActivationSearchContext(const Fuel& fuel, int fuelDirectionIndex,
-                                                    bool disableCaliforniumNeutronReflector,
+                                                    const BuildRequest& request,
                                                     const std::atomic_bool* cancelRequested) {
     ActivationSearchContext search;
     search.fuel = &fuel;
@@ -347,7 +374,8 @@ ActivationSearchContext makeActivationSearchContext(const Fuel& fuel, int fuelDi
     for (int direction : directions) {
         throwIfCancelled(cancelRequested);
         search.optionsByDirection.push_back(
-            activationLineOptionsForDirection(fuel, direction, disableCaliforniumNeutronReflector));
+            activationLineOptionsForDirection(fuel, direction, request.selectedModeratorTypeIndices,
+                                              request.selectedReflectorTypeIndices));
     }
 
     search.remainingMaxFlux.assign(search.optionsByDirection.size() + 1, 0.0);
@@ -410,12 +438,11 @@ void chooseActivationPlanRecursive(const ActivationSearchContext& search, size_t
 }
 
 std::optional<ActivationPlan> chooseActivationPlanForFuel(int fuelIndex, int fuelDirectionIndex,
-                                                          bool disableCaliforniumNeutronReflector,
+                                                          const BuildRequest& request,
                                                           const std::atomic_bool* cancelRequested) {
     const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
     ActivationSearchContext search =
-        makeActivationSearchContext(fuel, fuelDirectionIndex, disableCaliforniumNeutronReflector,
-                                    cancelRequested);
+        makeActivationSearchContext(fuel, fuelDirectionIndex, request, cancelRequested);
     ActivationPlan current;
     std::optional<ActivationPlan> best;
     chooseActivationPlanRecursive(search, 0, current, best);
@@ -505,8 +532,10 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
     }
 
     FixedIrradiatorSkeleton skeleton;
+    skeleton.sourceLineFallbackReflectorType = bestWeakSelectedReflectorType(request);
+    const int centerModeratorType = strongestSelectedModeratorType(request);
     const Pos center{kIrradiatorCenter, kIrradiatorCenter, kIrradiatorCenter};
-    if (!addFixedBlock(skeleton, center, {BlockKind::Irradiator, defaultIrradiatorRecipeIndex()})) {
+    if (!addFixedBlock(skeleton, center, {BlockKind::Irradiator, request.irradiatorRecipeIndex})) {
         throw std::runtime_error("中心辐照仓骨架发生方块冲突。");
     }
 
@@ -525,8 +554,8 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
 
         for (int distance = 1; distance <= 4; ++distance) {
             if (!addFixedBlock(skeleton, offset(center, dir, distance),
-                               {BlockKind::Moderator, kHeavyWaterModerator})) {
-                throw std::runtime_error("中心重水减速剂骨架发生方块冲突。");
+                               {BlockKind::Moderator, centerModeratorType})) {
+                throw std::runtime_error("中心高通量减速剂骨架发生方块冲突。");
             }
         }
 
@@ -538,8 +567,7 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
         }
 
         std::optional<ActivationPlan> activation =
-            chooseActivationPlanForFuel(fuelIndex, directionIndex,
-                                        request.disableCaliforniumNeutronReflector, cancelRequested);
+            chooseActivationPlanForFuel(fuelIndex, directionIndex, request, cancelRequested);
         if (!activation.has_value()) {
             std::ostringstream os;
             const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
@@ -657,13 +685,17 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
                                                    const std::atomic_bool* cancelRequested) {
     NCFR_PERF_COUNT(finalizeCandidateCalls);
     throwIfCancelled(cancelRequested);
+    const SupportBlockOptions supportOptions{
+        request.selectedModeratorTypeIndices,
+        request.selectedReflectorTypeIndices,
+    };
     FixedIrradiatorSkeleton skeleton = buildBaseSkeleton(request, cancelRequested);
     Grid grid = buildIrradiatorSkeletonGrid(request, skeleton);
 
     FuelSimulation sim = simulateMixedFuel(grid);
     requireSixFuelIrradiatorState(grid, sim, "初始骨架");
 
-    fillSupportBlocks(grid);
+    fillSupportBlocks(grid, &supportOptions);
     if (!restoreFixedIrradiatorSkeleton(grid, skeleton)) {
         throw std::runtime_error("放置基础支撑块后无法恢复中心辐照仓固定骨架。");
     }
@@ -696,7 +728,8 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
     }
 
     if (!isAcceptedSixFuelIrradiator(grid, sim)) {
-        grid = improveSupportBlocks(std::move(grid), cancelRequested, kIrradiatorImproveOptions);
+        grid = improveSupportBlocks(std::move(grid), cancelRequested, kIrradiatorImproveOptions,
+                                    &supportOptions);
         if (!restoreFixedIrradiatorSkeleton(grid, skeleton)) {
             throw std::runtime_error("小范围优化支撑块后无法恢复中心辐照仓固定骨架。");
         }

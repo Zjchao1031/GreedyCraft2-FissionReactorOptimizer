@@ -6,12 +6,12 @@
 
 #include <QApplication>
 #include <QAbstractItemView>
-#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QFrame>
@@ -21,15 +21,21 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
 #include <QList>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QPair>
+#include <QStylePainter>
+#include <QStyleOptionComboBox>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QStringList>
+#include <QStandardItem>
+#include <QStandardItemModel>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QThread>
@@ -82,6 +88,127 @@ QString fromUtf8String(const std::string& text) {
 
 QString replacementFailureMessage(const QString& reason) {
     return QString::fromUtf8("此燃料无法满足反应堆运行要求！原因：\n%1").arg(reason);
+}
+
+class CheckedComboBox final : public QComboBox {
+public:
+    explicit CheckedComboBox(QWidget* parent = nullptr) : QComboBox(parent) {
+        auto* itemModel = new QStandardItemModel(this);
+        setModel(itemModel);
+        setInsertPolicy(QComboBox::NoInsert);
+        view()->setSelectionMode(QAbstractItemView::NoSelection);
+        view()->viewport()->installEventFilter(this);
+
+        connect(itemModel, &QStandardItemModel::itemChanged, this, [this]() {
+            updateSummaryText();
+        });
+        connect(this, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+            QTimer::singleShot(0, this, [this]() {
+                updateSummaryText();
+            });
+        });
+        updateSummaryText();
+    }
+
+    void addCheckedItem(const QString& text, int value, const QString& toolTip) {
+        auto* item = new QStandardItem(text);
+        item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        item->setData(value, Qt::UserRole);
+        item->setToolTip(toolTip);
+        item->setCheckState(Qt::Checked);
+        checkedModel()->appendRow(item);
+        updateSummaryText();
+    }
+
+    std::vector<int> checkedValues() const {
+        std::vector<int> values;
+        const QStandardItemModel* itemModel = checkedModel();
+        values.reserve(static_cast<size_t>(itemModel->rowCount()));
+        for (int row = 0; row < itemModel->rowCount(); ++row) {
+            const QStandardItem* item = itemModel->item(row);
+            if (item == nullptr || item->checkState() != Qt::Checked) {
+                continue;
+            }
+            bool ok = false;
+            const int value = item->data(Qt::UserRole).toInt(&ok);
+            if (ok) {
+                values.push_back(value);
+            }
+        }
+        return values;
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == view()->viewport() && event->type() == QEvent::MouseButtonRelease) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() != Qt::LeftButton) {
+                return QComboBox::eventFilter(watched, event);
+            }
+            const QModelIndex index = view()->indexAt(mouseEvent->pos());
+            QStandardItem* item = index.isValid() ? checkedModel()->itemFromIndex(index) : nullptr;
+            if (item != nullptr) {
+                item->setCheckState(item->checkState() == Qt::Checked ? Qt::Unchecked : Qt::Checked);
+                updateSummaryText();
+            }
+            return true;
+        }
+        return QComboBox::eventFilter(watched, event);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QStylePainter painter(this);
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        option.currentText = summaryText_;
+        painter.drawComplexControl(QStyle::CC_ComboBox, option);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+    }
+
+    void hidePopup() override {
+        if (view() != nullptr && view()->underMouse()) {
+            return;
+        }
+        QComboBox::hidePopup();
+    }
+
+private:
+    QStandardItemModel* checkedModel() const {
+        return static_cast<QStandardItemModel*>(model());
+    }
+
+    void updateSummaryText() {
+        const QStandardItemModel* itemModel = checkedModel();
+        int checkedCount = 0;
+        QStringList checkedNames;
+        for (int row = 0; row < itemModel->rowCount(); ++row) {
+            const QStandardItem* item = itemModel->item(row);
+            if (item != nullptr && item->checkState() == Qt::Checked) {
+                ++checkedCount;
+                checkedNames << item->text();
+            }
+        }
+
+        const int total = itemModel->rowCount();
+        QString summary;
+        if (checkedCount <= 0) {
+            summary = QString::fromUtf8("未选择");
+        } else if (checkedCount == total) {
+            summary = QString::fromUtf8("全部");
+        } else {
+            summary = QString::fromUtf8("%1/%2 已选").arg(checkedCount).arg(total);
+        }
+        summaryText_ = summary;
+        setToolTip(checkedNames.isEmpty() ? summary : checkedNames.join(QString::fromUtf8("\n")));
+        update();
+    }
+
+    QString summaryText_;
+};
+
+std::vector<int> checkedComboValues(const QComboBox* combo) {
+    const auto* checkedCombo = dynamic_cast<const CheckedComboBox*>(combo);
+    return checkedCombo == nullptr ? std::vector<int>{} : checkedCombo->checkedValues();
 }
 
 QString simulationFailureReason(const ncfr::Grid& grid, const ncfr::FuelSimulation& sim) {
@@ -504,34 +631,90 @@ QJsonArray selectedFuelsToJson(const ncfr::BuildRequest& request) {
     return array;
 }
 
-QJsonObject requestToJson(const ncfr::BuildRequest& request) {
+QJsonArray selectedModeratorsToJson(const ncfr::BuildRequest& request) {
+    QJsonArray array;
+    for (int moderatorIndex : request.selectedModeratorTypeIndices) {
+        const ncfr::ModeratorType& moderator = ncfr::moderatorTypes().at(static_cast<size_t>(moderatorIndex));
+        array.append(QJsonObject{
+            {QStringLiteral("index"), moderatorIndex},
+            {QStringLiteral("registryName"), fromUtf8String(moderator.registryName)},
+            {QStringLiteral("nameZh"), fromUtf8String(moderator.nameZh)},
+            {QStringLiteral("nameEn"), fromUtf8String(moderator.nameEn)},
+            {QStringLiteral("fluxFactor"), moderator.fluxFactor},
+            {QStringLiteral("efficiency"), moderator.efficiency},
+        });
+    }
+    return array;
+}
+
+QJsonArray selectedReflectorsToJson(const ncfr::BuildRequest& request) {
+    QJsonArray array;
+    for (int reflectorIndex : request.selectedReflectorTypeIndices) {
+        const ncfr::ReflectorType& reflector = ncfr::reflectorTypes().at(static_cast<size_t>(reflectorIndex));
+        array.append(QJsonObject{
+            {QStringLiteral("index"), reflectorIndex},
+            {QStringLiteral("registryName"), fromUtf8String(reflector.registryName)},
+            {QStringLiteral("nameZh"), fromUtf8String(reflector.nameZh)},
+            {QStringLiteral("nameEn"), fromUtf8String(reflector.nameEn)},
+            {QStringLiteral("efficiency"), reflector.efficiency},
+            {QStringLiteral("reflectivity"), reflector.reflectivity},
+        });
+    }
+    return array;
+}
+
+QJsonObject irradiatorRecipeToJson(int recipeIndex) {
+    if (recipeIndex < 0 || recipeIndex >= static_cast<int>(ncfr::irradiatorRecipeTypes().size())) {
+        return {};
+    }
+    const ncfr::IrradiatorRecipeType& recipe =
+        ncfr::irradiatorRecipeTypes().at(static_cast<size_t>(recipeIndex));
     return {
+        {QStringLiteral("index"), recipeIndex},
+        {QStringLiteral("inputName"), fromUtf8String(recipe.inputName)},
+        {QStringLiteral("outputName"), fromUtf8String(recipe.outputName)},
+        {QStringLiteral("nameZh"), fromUtf8String(recipe.nameZh)},
+        {QStringLiteral("nameEn"), fromUtf8String(recipe.nameEn)},
+        {QStringLiteral("heatPerFlux"), recipe.heatPerFlux},
+        {QStringLiteral("efficiency"), recipe.efficiency},
+    };
+}
+
+QJsonObject requestToJson(const ncfr::BuildRequest& request) {
+    QJsonObject object{
         {QStringLiteral("fuelCells"), selectedFuelsToJson(request)},
         {QStringLiteral("sourceCount"), ncfr::requiredSourceCount(request)},
-        {QStringLiteral("disableCaliforniumNeutronReflector"), request.disableCaliforniumNeutronReflector},
+        {QStringLiteral("selectedModerators"), selectedModeratorsToJson(request)},
+        {QStringLiteral("selectedReflectors"), selectedReflectorsToJson(request)},
     };
+    const QJsonObject recipe = irradiatorRecipeToJson(request.irradiatorRecipeIndex);
+    if (!recipe.isEmpty()) {
+        object.insert(QStringLiteral("selectedIrradiatorRecipe"), recipe);
+    }
+    return object;
 }
 
 QJsonObject gridToJson(const ncfr::Grid& grid) {
     QJsonArray layers;
     for (int z = 0; z < grid.depth(); ++z) {
-        QJsonArray rows;
+        QJsonArray blocks;
         for (int y = 0; y < grid.height(); ++y) {
-            QJsonArray row;
             for (int x = 0; x < grid.width(); ++x) {
-                row.append(blockToJson(grid, x, y, z));
+                if (grid.at(x, y, z).kind == ncfr::BlockKind::Empty) {
+                    continue;
+                }
+                blocks.append(blockToJson(grid, x, y, z));
             }
-            rows.append(row);
         }
         layers.append(QJsonObject{
             {QStringLiteral("y"), z + 1},
-            {QStringLiteral("rows"), rows},
+            {QStringLiteral("blocks"), blocks},
         });
     }
 
     return {
         {QStringLiteral("coordinateSystem"),
-         QString::fromUtf8("坐标与二维分层方案一致：x 为横向列，y 为层号，z 为纵向行；x/z 从 0 开始，y 从 1 开始。")},
+         QString::fromUtf8("坐标与二维分层方案一致：x 为横向列，y 为层号，z 为纵向行；x/z 从 0 开始，y 从 1 开始；blocks 仅包含非空方块。")},
         {QStringLiteral("layers"), layers},
     };
 }
@@ -547,7 +730,7 @@ QJsonDocument resultToJsonDocument(const ncfr::OptimizationResult& result) {
 
     return QJsonDocument(QJsonObject{
         {QStringLiteral("schema"), QStringLiteral("nuclearcraft-fission-reactor-result")},
-        {QStringLiteral("schemaVersion"), 5},
+        {QStringLiteral("schemaVersion"), 8},
         {QStringLiteral("request"), requestToJson(result.request)},
         {QStringLiteral("internalSize"), sizeToJson(result.grid)},
         {QStringLiteral("externalSize"), fullSizeToJson(result.grid)},
@@ -745,6 +928,9 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
     rootLayout->setSpacing(8);
 
     controls.fixedFuelCellCount = fixedFuelCellCount;
+    controls.irradiatorRecipeCombo = nullptr;
+    controls.moderatorTypeCombo = nullptr;
+    controls.reflectorTypeCombo = nullptr;
 
     auto* topLayout = new QHBoxLayout();
     topLayout->addWidget(new QLabel(QString::fromUtf8("燃料单元"), group));
@@ -769,13 +955,82 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
     rootLayout->addLayout(topLayout);
 
     if (fixedFuelCellCount == 5) {
-        controls.disableCaliforniumReflectorCheck =
-            new QCheckBox(QString::fromUtf8("禁用锎中子反射器"), group);
-        controls.disableCaliforniumReflectorCheck->setToolTip(
-            QString::fromUtf8("勾选后，辐照结构生成不会使用锎中子反射器（增殖器）。"));
-        rootLayout->addWidget(controls.disableCaliforniumReflectorCheck);
-    } else {
-        controls.disableCaliforniumReflectorCheck = nullptr;
+        auto* irradiationGroup = new QGroupBox(QString::fromUtf8("辐照设置"), group);
+        auto* irradiationLayout = new QVBoxLayout(irradiationGroup);
+        irradiationLayout->setSpacing(6);
+
+        auto* recipeRow = new QWidget(irradiationGroup);
+        auto* recipeLayout = new QHBoxLayout(recipeRow);
+        recipeLayout->setContentsMargins(0, 0, 0, 0);
+        recipeLayout->setSpacing(6);
+        auto* recipeCombo = new QComboBox(recipeRow);
+        recipeCombo->setMinimumWidth(320);
+        for (int i = 0; i < static_cast<int>(ncfr::irradiatorRecipeTypes().size()); ++i) {
+            const ncfr::IrradiatorRecipeType& recipe =
+                ncfr::irradiatorRecipeTypes().at(static_cast<size_t>(i));
+            recipeCombo->addItem(fromUtf8String(recipe.nameZh), i);
+            recipeCombo->setItemData(
+                i,
+                QString::fromUtf8("英文：%1\n输入：%2\n输出：%3\n产热/通量：%4\n效率：%5")
+                    .arg(fromUtf8String(recipe.nameEn))
+                    .arg(fromUtf8String(recipe.inputName))
+                    .arg(fromUtf8String(recipe.outputName))
+                    .arg(recipe.heatPerFlux, 0, 'f', 2)
+                    .arg(recipe.efficiency, 0, 'f', 2),
+                Qt::ToolTipRole);
+        }
+        const int defaultRecipeIndex = ncfr::defaultIrradiatorRecipeIndex();
+        if (defaultRecipeIndex >= 0 && defaultRecipeIndex < recipeCombo->count()) {
+            recipeCombo->setCurrentIndex(defaultRecipeIndex);
+        }
+        recipeLayout->addWidget(new QLabel(QString::fromUtf8("辐照配方"), recipeRow));
+        recipeLayout->addWidget(recipeCombo, 1);
+        irradiationLayout->addWidget(recipeRow);
+        controls.irradiatorRecipeCombo = recipeCombo;
+
+        auto* reflectorRow = new QWidget(irradiationGroup);
+        auto* reflectorLayout = new QHBoxLayout(reflectorRow);
+        reflectorLayout->setContentsMargins(0, 0, 0, 0);
+        reflectorLayout->setSpacing(6);
+        auto* reflectorCombo = new CheckedComboBox(reflectorRow);
+        reflectorCombo->setMinimumWidth(320);
+        for (int i = 0; i < static_cast<int>(ncfr::reflectorTypes().size()); ++i) {
+            const ncfr::ReflectorType& reflector = ncfr::reflectorTypes().at(static_cast<size_t>(i));
+            reflectorCombo->addCheckedItem(
+                fromUtf8String(reflector.nameZh),
+                i,
+                QString::fromUtf8("英文：%1\n反射率：%2\n效率：%3")
+                    .arg(fromUtf8String(reflector.nameEn))
+                    .arg(reflector.reflectivity, 0, 'f', 2)
+                    .arg(reflector.efficiency, 0, 'f', 2));
+        }
+        reflectorLayout->addWidget(new QLabel(QString::fromUtf8("中子反射器"), reflectorRow));
+        reflectorLayout->addWidget(reflectorCombo, 1);
+        irradiationLayout->addWidget(reflectorRow);
+        controls.reflectorTypeCombo = reflectorCombo;
+
+        auto* moderatorRow = new QWidget(irradiationGroup);
+        auto* moderatorLayout = new QHBoxLayout(moderatorRow);
+        moderatorLayout->setContentsMargins(0, 0, 0, 0);
+        moderatorLayout->setSpacing(6);
+        auto* moderatorCombo = new CheckedComboBox(moderatorRow);
+        moderatorCombo->setMinimumWidth(320);
+        for (int i = 0; i < static_cast<int>(ncfr::moderatorTypes().size()); ++i) {
+            const ncfr::ModeratorType& moderator = ncfr::moderatorTypes().at(static_cast<size_t>(i));
+            moderatorCombo->addCheckedItem(
+                fromUtf8String(moderator.nameZh),
+                i,
+                QString::fromUtf8("英文：%1\n中子通量：%2\n效率：%3")
+                    .arg(fromUtf8String(moderator.nameEn))
+                    .arg(moderator.fluxFactor)
+                    .arg(moderator.efficiency, 0, 'f', 2));
+        }
+        moderatorLayout->addWidget(new QLabel(QString::fromUtf8("减速剂"), moderatorRow));
+        moderatorLayout->addWidget(moderatorCombo, 1);
+        irradiationLayout->addWidget(moderatorRow);
+        controls.moderatorTypeCombo = moderatorCombo;
+
+        rootLayout->addWidget(irradiationGroup);
     }
 
     auto* fuelGroup = new QGroupBox(QString::fromUtf8("燃料单元"), group);
@@ -953,9 +1208,23 @@ ncfr::BuildRequest MainWindow::buildRequestFromUi(const FuelInputControls& contr
         }
         request.fuelIndices.push_back(combo->currentData().toInt());
     }
-    if (controls.disableCaliforniumReflectorCheck != nullptr) {
-        request.disableCaliforniumNeutronReflector =
-            controls.disableCaliforniumReflectorCheck->isChecked();
+    if (controls.fixedFuelCellCount == 5) {
+        if (controls.irradiatorRecipeCombo == nullptr || controls.irradiatorRecipeCombo->currentIndex() < 0) {
+            throw std::runtime_error("请选择辐照配方。");
+        }
+        bool ok = false;
+        request.irradiatorRecipeIndex = controls.irradiatorRecipeCombo->currentData().toInt(&ok);
+        if (!ok) {
+            throw std::runtime_error("请选择有效的辐照配方。");
+        }
+        request.selectedModeratorTypeIndices = checkedComboValues(controls.moderatorTypeCombo);
+        request.selectedReflectorTypeIndices = checkedComboValues(controls.reflectorTypeCombo);
+        if (request.selectedModeratorTypeIndices.empty()) {
+            throw std::runtime_error("请至少选择一个减速剂。");
+        }
+        if (request.selectedReflectorTypeIndices.empty()) {
+            throw std::runtime_error("请至少选择一个中子反射器。");
+        }
     }
     return request;
 }
@@ -982,13 +1251,6 @@ void MainWindow::generateLayout(const FuelInputControls& controls) {
 
     QThread* thread = QThread::create([this, request = std::move(request), cancelFlag]() {
         try {
-            if (ncfr::fuels().size() != 135 || ncfr::sinkTypes().size() != 86 ||
-                ncfr::moderatorTypes().size() != 6 || ncfr::reflectorTypes().size() != 4 ||
-                ncfr::sourceTypes().size() != 3 || ncfr::shieldTypes().size() != 2 ||
-                ncfr::irradiatorRecipeTypes().size() != 3) {
-                throw std::runtime_error(QString::fromUtf8("嵌入数据数量与工作表预期不一致。").toStdString());
-            }
-
             ncfr::OptimizationResult result = ncfr::optimizeLayout(request, cancelFlag.get());
             if (cancelFlag->load()) {
                 throw ncfr::OptimizationCanceled();

@@ -52,6 +52,11 @@ struct CoolingExpansionOptions {
     size_t bridgeSinkTypeLimit = 4;
 };
 
+struct SupportBlockOptions {
+    std::vector<int> moderatorTypeIndices;
+    std::vector<int> reflectorTypeIndices;
+};
+
 enum class FinalizeFailureKind {
     None,
     NotRunnable,
@@ -104,11 +109,11 @@ bool isManaDustSink(const Block& block);
 bool isInteriorCorner(const Grid& grid, const Pos& pos);
 bool cornerSinkConnectsToInteriorCluster(const Grid& grid, const Pos& corner);
 void removeUnclusteredCornerManaDustSinks(Grid& grid);
-void fillSupportBlocks(Grid& grid);
+void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions = nullptr);
 std::vector<Pos> fuelPositionsInGrid(const Grid& grid);
 bool allSourcesTargetFuel(const Grid& grid);
 bool hasNoEmptyInteriorPlane(const Grid& grid);
-std::vector<Block> replacementBlocks();
+std::vector<Block> replacementBlocks(const SupportBlockOptions* supportOptions = nullptr);
 bool isSupportMutable(const Block& block);
 bool isRequiredSupportBlock(const Grid& grid, const FuelSimulation& sim, int idx);
 int countFunctionalIrradiators(const FuelSimulation& sim);
@@ -120,7 +125,8 @@ CandidateScore scoreSimulation(const Grid& grid, const FuelSimulation& sim);
 bool betterScore(const CandidateScore& lhs, const CandidateScore& rhs);
 std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& sim, const ImproveOptions& options);
 Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
-                          const ImproveOptions& options = kDefaultImproveOptions);
+                          const ImproveOptions& options = kDefaultImproveOptions,
+                          const SupportBlockOptions* supportOptions = nullptr);
 
 Grid expandCooling(Grid grid, const BuildRequest& request, const std::vector<int>& sourceDirections,
                    const std::vector<int>& reflectorDirections,

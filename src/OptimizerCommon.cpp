@@ -254,6 +254,21 @@ void validateRequest(const BuildRequest& request) {
     for (int index : request.fuelIndices) {
         validateIndex(index, static_cast<int>(fuels().size()), "燃料");
     }
+    if (request.fuelIndices.size() == 5) {
+        if (request.selectedModeratorTypeIndices.empty()) {
+            throw std::invalid_argument("辐照结构生成需要至少选择一个减速剂。");
+        }
+        if (request.selectedReflectorTypeIndices.empty()) {
+            throw std::invalid_argument("辐照结构生成需要至少选择一个中子反射器。");
+        }
+        validateIndex(request.irradiatorRecipeIndex, static_cast<int>(irradiatorRecipeTypes().size()), "辐照配方");
+    }
+    for (int index : request.selectedModeratorTypeIndices) {
+        validateIndex(index, static_cast<int>(moderatorTypes().size()), "减速剂");
+    }
+    for (int index : request.selectedReflectorTypeIndices) {
+        validateIndex(index, static_cast<int>(reflectorTypes().size()), "中子反射器");
+    }
 }
 
 std::vector<Dimension> sortedDimensions() {
@@ -453,16 +468,53 @@ void removeUnclusteredCornerManaDustSinks(Grid& grid) {
     }
 }
 
-void fillSupportBlocks(Grid& grid) {
+const SupportBlockOptions& defaultSupportBlockOptions() {
+    static const SupportBlockOptions options{{2}, {0, 1}};
+    return options;
+}
+
+const SupportBlockOptions& effectiveSupportBlockOptions(const SupportBlockOptions* options) {
+    return options == nullptr ? defaultSupportBlockOptions() : *options;
+}
+
+bool validModeratorTypeIndex(int index) {
+    return index >= 0 && index < static_cast<int>(moderatorTypes().size());
+}
+
+bool validReflectorTypeIndex(int index) {
+    return index >= 0 && index < static_cast<int>(reflectorTypes().size());
+}
+
+int strongestModeratorType(const std::vector<int>& moderatorTypeIndices) {
+    int bestType = -1;
+    int bestFlux = std::numeric_limits<int>::min();
+    for (int type : moderatorTypeIndices) {
+        if (!validModeratorTypeIndex(type)) {
+            continue;
+        }
+        const int flux = moderatorTypes().at(static_cast<size_t>(type)).fluxFactor;
+        if (flux > bestFlux || (flux == bestFlux && (bestType < 0 || type < bestType))) {
+            bestType = type;
+            bestFlux = flux;
+        }
+    }
+    return bestType;
+}
+
+void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions) {
     NCFR_PERF_COUNT(fillSupportCalls);
     NCFR_PERF_SCOPE(fillSupportNs);
+    const SupportBlockOptions& support = effectiveSupportBlockOptions(supportOptions);
+    const int moderatorType = strongestModeratorType(support.moderatorTypeIndices);
     for (const Pos& pos : grid.interiorPositions()) {
         Block& block = grid.at(pos.x, pos.y, pos.z);
         if (block.kind != BlockKind::Empty) {
             continue;
         }
-        if (isBetweenFuelCells(grid, pos, 0) || isBetweenFuelCells(grid, pos, 1) || isBetweenFuelCells(grid, pos, 2)) {
-            block = {BlockKind::Moderator, 2};
+        if (moderatorType >= 0 &&
+            (isBetweenFuelCells(grid, pos, 0) || isBetweenFuelCells(grid, pos, 1) ||
+             isBetweenFuelCells(grid, pos, 2))) {
+            block = {BlockKind::Moderator, moderatorType};
         }
     }
 
@@ -697,7 +749,8 @@ std::vector<Pos> fuelPositionsInGrid(const Grid& grid) {
     return positions;
 }
 
-std::vector<Block> replacementBlocks() {
+std::vector<Block> replacementBlocks(const SupportBlockOptions* supportOptions) {
+    const SupportBlockOptions& support = effectiveSupportBlockOptions(supportOptions);
     std::vector<SinkType> sinks = sinkTypes();
     sinks.erase(std::remove_if(sinks.begin(), sinks.end(), [](const SinkType& sink) { return sink.cooling <= 0; }),
                 sinks.end());
@@ -711,9 +764,16 @@ std::vector<Block> replacementBlocks() {
     }
     blocks.push_back({BlockKind::Shield, 1});
     blocks.push_back({BlockKind::Shield, 0});
-    blocks.push_back({BlockKind::Moderator, 2});
-    blocks.push_back({BlockKind::Reflector, 0});
-    blocks.push_back({BlockKind::Reflector, 1});
+    for (int moderatorType : support.moderatorTypeIndices) {
+        if (validModeratorTypeIndex(moderatorType)) {
+            blocks.push_back({BlockKind::Moderator, moderatorType});
+        }
+    }
+    for (int reflectorType : support.reflectorTypeIndices) {
+        if (validReflectorTypeIndex(reflectorType)) {
+            blocks.push_back({BlockKind::Reflector, reflectorType});
+        }
+    }
     blocks.push_back({BlockKind::Empty, -1});
     return blocks;
 }
@@ -932,10 +992,11 @@ std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& si
 }
 
 Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
-                          const ImproveOptions& options) {
+                          const ImproveOptions& options,
+                          const SupportBlockOptions* supportOptions) {
     NCFR_PERF_COUNT(improveCalls);
     NCFR_PERF_SCOPE(improveNs);
-    const std::vector<Block> blocks = replacementBlocks();
+    const std::vector<Block> blocks = replacementBlocks(supportOptions);
     for (int pass = 0; pass < options.maxPasses; ++pass) {
         throwIfCancelled(cancelRequested);
         NCFR_PERF_COUNT(improvePasses);
