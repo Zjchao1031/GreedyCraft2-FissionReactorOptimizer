@@ -163,7 +163,7 @@ void traceFuelRelationLine(const Grid& grid, const Fuel& fuel, const Pos& from, 
             return;
         }
         if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 &&
-            moderatorCount <= kNeutronReach / 2) {
+            moderatorCount <= kNeutronReach) {
             const auto& reflector = reflectorTypes().at(static_cast<size_t>(targetBlock.type));
             fluxByIndex.at(static_cast<size_t>(fromIndex)) += std::floor(2.0 * lineFlux * reflector.reflectivity);
             return;

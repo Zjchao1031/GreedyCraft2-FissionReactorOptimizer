@@ -19,10 +19,6 @@ constexpr int kIrradiatorInteriorSize = 17;
 constexpr int kIrradiatorCenter = 9;
 constexpr int kIrradiatorFuelInputCount = 5;
 constexpr int kAnySource = -1;
-constexpr int kWaterSink = 0;
-constexpr int kIronSink = 1;
-constexpr int kLeadSink = 17;
-constexpr int kLiquidOxygenSink = 66;
 constexpr double kActivationFluxEpsilon = 1e-9;
 constexpr ImproveOptions kIrradiatorImproveOptions{1, 1, 64};
 constexpr CoolingExpansionOptions kIrradiatorCoolingExpansionOptions{12, 2, 192, 3, 192, 64, 64, 3};
@@ -216,15 +212,15 @@ void addWallConnectionChain(FixedIrradiatorSkeleton& skeleton, const Pos& fuelPo
     const Direction& perpendicular =
         kSourceDirections.at(static_cast<size_t>(wallConnectionPerpendicularDirectionIndex(directionIndex)));
     const std::array<std::pair<Pos, Block>, 4> chain = {{
-        {offset(fuelPos, perpendicular, 1), {BlockKind::Sink, kWaterSink}},
-        {offset(offset(fuelPos, outwardDir, 1), perpendicular, 1), {BlockKind::Sink, kIronSink}},
-        {offset(offset(fuelPos, outwardDir, 2), perpendicular, 1), {BlockKind::Sink, kLeadSink}},
-        {offset(offset(fuelPos, outwardDir, 3), perpendicular, 1), {BlockKind::Sink, kLiquidOxygenSink}},
+        {offset(fuelPos, perpendicular, 1), {BlockKind::Conductor, -1}},
+        {offset(offset(fuelPos, outwardDir, 1), perpendicular, 1), {BlockKind::Conductor, -1}},
+        {offset(offset(fuelPos, outwardDir, 2), perpendicular, 1), {BlockKind::Conductor, -1}},
+        {offset(offset(fuelPos, outwardDir, 3), perpendicular, 1), {BlockKind::Conductor, -1}},
     }};
 
     for (const auto& [pos, block] : chain) {
         if (!addFixedBlock(skeleton, pos, block)) {
-            throw std::runtime_error("燃料到外壳的固定散热连接链发生方块冲突。");
+            throw std::runtime_error("燃料到外壳的固定导体连接链发生方块冲突。");
         }
     }
 }

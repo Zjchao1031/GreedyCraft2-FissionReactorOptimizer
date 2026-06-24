@@ -76,6 +76,35 @@ struct Counters {
     long long evaluateValidSinksPasses = 0;
     long long evaluateValidSinksPositions = 0;
     long long sinkValidityChecks = 0;
+
+#ifndef NDEBUG
+    long long mergeLayoutCalls = 0;
+    long long mergeNoHeatingSinkRejects = 0;
+    long long mergeCandidateAttempts = 0;
+    long long mergePlanarCandidateAttempts = 0;
+    long long mergeAnyAxisCandidateAttempts = 0;
+    long long mergeBuildRejectEmpty = 0;
+    long long mergeBuildRejectSize = 0;
+    long long mergeBuildRejectConflict = 0;
+    long long mergeBuildRejectFuelSlot = 0;
+    long long mergeBuildRejectFuelDuplicate = 0;
+    long long mergeBuildRejectFuelMissing = 0;
+    long long mergeBuildRejectSource = 0;
+    long long mergeSimulationRejectNotRunnable = 0;
+    long long mergeSimulationRejectUnsafeFlux = 0;
+    long long mergeSimulationRejectDisconnected = 0;
+    long long mergeSimulationRejectCooling = 0;
+    long long mergeSimulationRejectClusterCount = 0;
+    long long mergeSimulationRejectOther = 0;
+    long long mergeAcceptedCandidates = 0;
+    long long mergeAcceptedPlanarCandidates = 0;
+    long long mergeAcceptedAnyAxisCandidates = 0;
+    long long mergeSourcePlacementAttempts = 0;
+    long long mergeSourceBoundaryRejects = 0;
+    long long mergeSourceLineRejects = 0;
+    long long mergeSourceTargetRejects = 0;
+    long long mergeSourcePlaced = 0;
+#endif
 };
 
 #ifndef NDEBUG

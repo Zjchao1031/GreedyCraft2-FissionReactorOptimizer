@@ -563,12 +563,12 @@ Grid expandCoolingWithPreserver(Grid grid, const std::function<bool(Grid&)>& pre
 }
 
 Grid expandCooling(Grid grid, const BuildRequest& request, const std::vector<int>& sourceDirections,
-                   const std::vector<int>& reflectorDirections,
+                   const std::vector<FuelLineSpec>& fuelLines,
                    const std::atomic_bool* cancelRequested, const CoolingExpansionOptions& options) {
     return expandCoolingWithPreserver(
         std::move(grid),
         [&](Grid& candidate) {
-            return restoreDirectionalFuelLines(candidate, request, sourceDirections, reflectorDirections);
+            return restoreDirectionalFuelLines(candidate, request, sourceDirections, fuelLines);
         },
         cancelRequested, options);
 }

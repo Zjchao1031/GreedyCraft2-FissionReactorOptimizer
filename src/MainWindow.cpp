@@ -90,6 +90,11 @@ QString replacementFailureMessage(const QString& reason) {
     return QString::fromUtf8("此燃料无法满足反应堆运行要求！原因：\n%1").arg(reason);
 }
 
+bool isBlockedNormalSingleFuel(const ncfr::Fuel& fuel) {
+    return fuel.nameEn == "WGE-254 Zirconium Alloy Fuel Pellet" ||
+           fuel.nameEn == "IPE-254 Zirconium Alloy Fuel Pellet";
+}
+
 class CheckedComboBox final : public QComboBox {
 public:
     explicit CheckedComboBox(QWidget* parent = nullptr) : QComboBox(parent) {
@@ -934,12 +939,14 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
     topLayout->addWidget(controls.generateButton);
     rootLayout->addLayout(topLayout);
 
-    if (fixedFuelCellCount == 5) {
-        auto* irradiationGroup = new QGroupBox(QString::fromUtf8("辐照设置"), group);
-        auto* irradiationLayout = new QVBoxLayout(irradiationGroup);
-        irradiationLayout->setSpacing(6);
+    auto* materialGroup = new QGroupBox(
+        fixedFuelCellCount == 5 ? QString::fromUtf8("辐照设置") : QString::fromUtf8("材料设置"),
+        group);
+    auto* materialLayout = new QVBoxLayout(materialGroup);
+    materialLayout->setSpacing(6);
 
-        auto* recipeRow = new QWidget(irradiationGroup);
+    if (fixedFuelCellCount == 5) {
+        auto* recipeRow = new QWidget(materialGroup);
         auto* recipeLayout = new QHBoxLayout(recipeRow);
         recipeLayout->setContentsMargins(0, 0, 0, 0);
         recipeLayout->setSpacing(6);
@@ -965,53 +972,53 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
         }
         recipeLayout->addWidget(new QLabel(QString::fromUtf8("辐照配方"), recipeRow));
         recipeLayout->addWidget(recipeCombo, 1);
-        irradiationLayout->addWidget(recipeRow);
+        materialLayout->addWidget(recipeRow);
         controls.irradiatorRecipeCombo = recipeCombo;
-
-        auto* reflectorRow = new QWidget(irradiationGroup);
-        auto* reflectorLayout = new QHBoxLayout(reflectorRow);
-        reflectorLayout->setContentsMargins(0, 0, 0, 0);
-        reflectorLayout->setSpacing(6);
-        auto* reflectorCombo = new CheckedComboBox(reflectorRow);
-        reflectorCombo->setMinimumWidth(320);
-        for (int i = 0; i < static_cast<int>(ncfr::reflectorTypes().size()); ++i) {
-            const ncfr::ReflectorType& reflector = ncfr::reflectorTypes().at(static_cast<size_t>(i));
-            reflectorCombo->addCheckedItem(
-                fromUtf8String(reflector.nameZh),
-                i,
-                QString::fromUtf8("英文：%1\n反射率：%2\n效率：%3")
-                    .arg(fromUtf8String(reflector.nameEn))
-                    .arg(reflector.reflectivity, 0, 'f', 2)
-                    .arg(reflector.efficiency, 0, 'f', 2));
-        }
-        reflectorLayout->addWidget(new QLabel(QString::fromUtf8("中子反射器"), reflectorRow));
-        reflectorLayout->addWidget(reflectorCombo, 1);
-        irradiationLayout->addWidget(reflectorRow);
-        controls.reflectorTypeCombo = reflectorCombo;
-
-        auto* moderatorRow = new QWidget(irradiationGroup);
-        auto* moderatorLayout = new QHBoxLayout(moderatorRow);
-        moderatorLayout->setContentsMargins(0, 0, 0, 0);
-        moderatorLayout->setSpacing(6);
-        auto* moderatorCombo = new CheckedComboBox(moderatorRow);
-        moderatorCombo->setMinimumWidth(320);
-        for (int i = 0; i < static_cast<int>(ncfr::moderatorTypes().size()); ++i) {
-            const ncfr::ModeratorType& moderator = ncfr::moderatorTypes().at(static_cast<size_t>(i));
-            moderatorCombo->addCheckedItem(
-                fromUtf8String(moderator.nameZh),
-                i,
-                QString::fromUtf8("英文：%1\n中子通量：%2\n效率：%3")
-                    .arg(fromUtf8String(moderator.nameEn))
-                    .arg(moderator.fluxFactor)
-                    .arg(moderator.efficiency, 0, 'f', 2));
-        }
-        moderatorLayout->addWidget(new QLabel(QString::fromUtf8("减速剂"), moderatorRow));
-        moderatorLayout->addWidget(moderatorCombo, 1);
-        irradiationLayout->addWidget(moderatorRow);
-        controls.moderatorTypeCombo = moderatorCombo;
-
-        rootLayout->addWidget(irradiationGroup);
     }
+
+    auto* reflectorRow = new QWidget(materialGroup);
+    auto* reflectorLayout = new QHBoxLayout(reflectorRow);
+    reflectorLayout->setContentsMargins(0, 0, 0, 0);
+    reflectorLayout->setSpacing(6);
+    auto* reflectorCombo = new CheckedComboBox(reflectorRow);
+    reflectorCombo->setMinimumWidth(320);
+    for (int i = 0; i < static_cast<int>(ncfr::reflectorTypes().size()); ++i) {
+        const ncfr::ReflectorType& reflector = ncfr::reflectorTypes().at(static_cast<size_t>(i));
+        reflectorCombo->addCheckedItem(
+            fromUtf8String(reflector.nameZh),
+            i,
+            QString::fromUtf8("英文：%1\n反射率：%2\n效率：%3")
+                .arg(fromUtf8String(reflector.nameEn))
+                .arg(reflector.reflectivity, 0, 'f', 2)
+                .arg(reflector.efficiency, 0, 'f', 2));
+    }
+    reflectorLayout->addWidget(new QLabel(QString::fromUtf8("中子反射器"), reflectorRow));
+    reflectorLayout->addWidget(reflectorCombo, 1);
+    materialLayout->addWidget(reflectorRow);
+    controls.reflectorTypeCombo = reflectorCombo;
+
+    auto* moderatorRow = new QWidget(materialGroup);
+    auto* moderatorLayout = new QHBoxLayout(moderatorRow);
+    moderatorLayout->setContentsMargins(0, 0, 0, 0);
+    moderatorLayout->setSpacing(6);
+    auto* moderatorCombo = new CheckedComboBox(moderatorRow);
+    moderatorCombo->setMinimumWidth(320);
+    for (int i = 0; i < static_cast<int>(ncfr::moderatorTypes().size()); ++i) {
+        const ncfr::ModeratorType& moderator = ncfr::moderatorTypes().at(static_cast<size_t>(i));
+        moderatorCombo->addCheckedItem(
+            fromUtf8String(moderator.nameZh),
+            i,
+            QString::fromUtf8("英文：%1\n中子通量：%2\n效率：%3")
+                .arg(fromUtf8String(moderator.nameEn))
+                .arg(moderator.fluxFactor)
+                .arg(moderator.efficiency, 0, 'f', 2));
+    }
+    moderatorLayout->addWidget(new QLabel(QString::fromUtf8("减速剂"), moderatorRow));
+    moderatorLayout->addWidget(moderatorCombo, 1);
+    materialLayout->addWidget(moderatorRow);
+    controls.moderatorTypeCombo = moderatorCombo;
+
+    rootLayout->addWidget(materialGroup);
 
     auto* fuelGroup = new QGroupBox(QString::fromUtf8("燃料单元"), group);
     controls.fuelRowsLayout = new QVBoxLayout(fuelGroup);
@@ -1094,7 +1101,7 @@ QWidget* MainWindow::createLegendPanel() {
         {QString::fromUtf8("减速剂"), ncfr::BlockKind::Moderator},
         {QString::fromUtf8("反射器"), ncfr::BlockKind::Reflector},
         {QString::fromUtf8("裂变中子辐照器"), ncfr::BlockKind::Irradiator},
-        {QString::fromUtf8("导体"), ncfr::BlockKind::Conductor},
+        {QString::fromUtf8("裂变反应堆导体"), ncfr::BlockKind::Conductor},
         {QString::fromUtf8("散热器"), ncfr::BlockKind::Sink},
     };
 
@@ -1188,6 +1195,14 @@ ncfr::BuildRequest MainWindow::buildRequestFromUi(const FuelInputControls& contr
         }
         request.fuelIndices.push_back(combo->currentData().toInt());
     }
+    request.selectedModeratorTypeIndices = checkedComboValues(controls.moderatorTypeCombo);
+    request.selectedReflectorTypeIndices = checkedComboValues(controls.reflectorTypeCombo);
+    if (request.selectedModeratorTypeIndices.empty()) {
+        throw std::runtime_error("请至少选择一个减速剂。");
+    }
+    if (request.selectedReflectorTypeIndices.empty()) {
+        throw std::runtime_error("请至少选择一个中子反射器。");
+    }
     if (controls.fixedFuelCellCount == 5) {
         if (controls.irradiatorRecipeCombo == nullptr || controls.irradiatorRecipeCombo->currentIndex() < 0) {
             throw std::runtime_error("请选择辐照配方。");
@@ -1196,14 +1211,6 @@ ncfr::BuildRequest MainWindow::buildRequestFromUi(const FuelInputControls& contr
         request.irradiatorRecipeIndex = controls.irradiatorRecipeCombo->currentData().toInt(&ok);
         if (!ok) {
             throw std::runtime_error("请选择有效的辐照配方。");
-        }
-        request.selectedModeratorTypeIndices = checkedComboValues(controls.moderatorTypeCombo);
-        request.selectedReflectorTypeIndices = checkedComboValues(controls.reflectorTypeCombo);
-        if (request.selectedModeratorTypeIndices.empty()) {
-            throw std::runtime_error("请至少选择一个减速剂。");
-        }
-        if (request.selectedReflectorTypeIndices.empty()) {
-            throw std::runtime_error("请至少选择一个中子反射器。");
         }
     }
     return request;
@@ -1220,6 +1227,18 @@ void MainWindow::generateLayout(const FuelInputControls& controls) {
     } catch (const std::exception& ex) {
         QMessageBox::warning(this, QString::fromUtf8("输入不完整"), QString::fromUtf8(ex.what()));
         return;
+    }
+    if (controls.fixedFuelCellCount == 0 && request.fuelIndices.size() == 1) {
+        const int fuelIndex = request.fuelIndices.front();
+        if (fuelIndex >= 0 && fuelIndex < static_cast<int>(ncfr::fuels().size()) &&
+            isBlockedNormalSingleFuel(ncfr::fuels().at(static_cast<size_t>(fuelIndex)))) {
+            QMessageBox::warning(
+                this,
+                QString::fromUtf8("燃料发热过高"),
+                QString::fromUtf8(
+                    "此种燃料基础发热值过大，采用单种燃料的输入方式难以生成满足要求的结构，建议采用低发热+高发热的输入组合以降低平均发热。"));
+            return;
+        }
     }
     setGenerationButtonsEnabled(false);
     exportJsonButton_->setEnabled(false);

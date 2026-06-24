@@ -57,6 +57,14 @@ struct SupportBlockOptions {
     std::vector<int> reflectorTypeIndices;
 };
 
+struct FuelLineSpec {
+    int direction = 0;
+    int moderatorCount = 1;
+    int moderatorType = 0;
+    int reflectorType = 0;
+    double estimatedFlux = 0.0;
+};
+
 enum class FinalizeFailureKind {
     None,
     NotRunnable,
@@ -109,7 +117,8 @@ bool isManaDustSink(const Block& block);
 bool isInteriorCorner(const Grid& grid, const Pos& pos);
 bool cornerSinkConnectsToInteriorCluster(const Grid& grid, const Pos& corner);
 void removeUnclusteredCornerManaDustSinks(Grid& grid);
-void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions = nullptr);
+void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions = nullptr,
+                       const StateVector* protectedPositions = nullptr);
 std::vector<Pos> fuelPositionsInGrid(const Grid& grid);
 bool allSourcesTargetFuel(const Grid& grid);
 bool hasNoEmptyInteriorPlane(const Grid& grid);
@@ -123,13 +132,16 @@ std::vector<Pos> fuelCellPortPositions(const Grid& grid);
 void addFuelCellPorts(Grid& grid, const BuildRequest& request);
 CandidateScore scoreSimulation(const Grid& grid, const FuelSimulation& sim);
 bool betterScore(const CandidateScore& lhs, const CandidateScore& rhs);
-std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& sim, const ImproveOptions& options);
+std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& sim, const ImproveOptions& options,
+                                      const StateVector* protectedPositions = nullptr, bool emptyOnly = false);
 Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
                           const ImproveOptions& options = kDefaultImproveOptions,
-                          const SupportBlockOptions* supportOptions = nullptr);
+                          const SupportBlockOptions* supportOptions = nullptr,
+                          const StateVector* protectedPositions = nullptr,
+                          bool emptyOnly = false);
 
 Grid expandCooling(Grid grid, const BuildRequest& request, const std::vector<int>& sourceDirections,
-                   const std::vector<int>& reflectorDirections,
+                   const std::vector<FuelLineSpec>& fuelLines,
                    const std::atomic_bool* cancelRequested, const CoolingExpansionOptions& options);
 Grid expandCoolingWithPreserver(Grid grid, const std::function<bool(Grid&)>& preserveGrid,
                                 const std::atomic_bool* cancelRequested,
@@ -148,25 +160,19 @@ bool containsDirectionIndex(const std::vector<int>& indices, int index);
 Pos offset(const Pos& pos, const Direction& dir, int distance);
 Pos sourcePositionForDirection(const Grid& grid, const Pos& fuelPos, const Direction& dir);
 std::vector<std::vector<int>> sourceDirectionCombinations(int sourceCount);
-double estimatedReflectorFlux(const Fuel& fuel, bool sourceDirection);
-double estimatedReflectorFlux(const Fuel& fuel, const std::vector<int>& sourceDirections,
-                              const std::vector<int>& reflectorDirections);
-std::vector<std::vector<int>> reflectorDirectionCombinations(const Fuel& fuel,
-                                                             const std::vector<int>& sourceDirections);
 std::vector<Dimension> singleFuelSearchDimensions(const FuelActivationProfile& profile);
 bool placeDirectionalSources(Grid& grid, const BuildRequest& request, const Pos& fuelPos,
                              const std::vector<int>& sourceDirections);
-std::optional<Grid> buildSingleFuelSkeleton(const Dimension& dim, const BuildRequest& request,
-                                            const std::vector<int>& sourceDirections,
-                                            const std::vector<int>& reflectorDirections);
 bool isFullyReflectiveReflector(const Block& block);
-void keepSourceLinesOpen(Grid& grid, const std::vector<int>& sourceDirections);
+Block sourceLineReplacementBlock(const BuildRequest& request);
+void keepSourceLinesOpen(Grid& grid, const BuildRequest& request, const std::vector<int>& sourceDirections);
 bool restoreDirectionalFuelLines(Grid& grid, const BuildRequest& request, const std::vector<int>& sourceDirections,
-                                 const std::vector<int>& reflectorDirections);
-void pruneInactiveSupport(Grid& grid);
+                                 const std::vector<FuelLineSpec>& fuelLines);
+void pruneInactiveSupport(Grid& grid, const StateVector* protectedPositions = nullptr);
 FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& request,
                                                const std::vector<int>& sourceDirections,
-                                               const std::vector<int>& reflectorDirections,
+                                               const std::vector<FuelLineSpec>& fuelLines,
+                                               const StateVector* protectedPositions,
                                                const std::atomic_bool* cancelRequested);
 OptimizationResult optimizeSingleFuelDirectionalLayout(const BuildRequest& request,
                                                        const std::vector<std::vector<int>>& sourceCombos,
@@ -175,7 +181,6 @@ BuildRequest singleFuelRequestForSlot(const BuildRequest& request, int slot);
 OptimizationResult optimizeSingleFuelForSlot(const BuildRequest& request, int slot,
                                              const std::atomic_bool* cancelRequested);
 bool heatPriorityLess(int lhsSlot, int rhsSlot, const BuildRequest& request);
-int primarySameStartupSlot(const BuildRequest& request);
 
 OptimizationResult optimizeDualFuelLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested);
 OptimizationResult optimizeQuadFuelLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested);

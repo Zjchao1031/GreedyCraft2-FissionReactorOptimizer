@@ -146,6 +146,32 @@ void writeCounters(std::ostream& os) {
     writeMetric(os, "count.evaluateValidSinksPasses", metrics.evaluateValidSinksPasses);
     writeMetric(os, "count.evaluateValidSinksPositions", metrics.evaluateValidSinksPositions);
     writeMetric(os, "count.sinkValidityChecks", metrics.sinkValidityChecks);
+    writeMetric(os, "count.mergeLayoutCalls", metrics.mergeLayoutCalls);
+    writeMetric(os, "count.mergeNoHeatingSinkRejects", metrics.mergeNoHeatingSinkRejects);
+    writeMetric(os, "count.mergeCandidateAttempts", metrics.mergeCandidateAttempts);
+    writeMetric(os, "count.mergePlanarCandidateAttempts", metrics.mergePlanarCandidateAttempts);
+    writeMetric(os, "count.mergeAnyAxisCandidateAttempts", metrics.mergeAnyAxisCandidateAttempts);
+    writeMetric(os, "count.mergeBuildRejectEmpty", metrics.mergeBuildRejectEmpty);
+    writeMetric(os, "count.mergeBuildRejectSize", metrics.mergeBuildRejectSize);
+    writeMetric(os, "count.mergeBuildRejectConflict", metrics.mergeBuildRejectConflict);
+    writeMetric(os, "count.mergeBuildRejectFuelSlot", metrics.mergeBuildRejectFuelSlot);
+    writeMetric(os, "count.mergeBuildRejectFuelDuplicate", metrics.mergeBuildRejectFuelDuplicate);
+    writeMetric(os, "count.mergeBuildRejectFuelMissing", metrics.mergeBuildRejectFuelMissing);
+    writeMetric(os, "count.mergeBuildRejectSource", metrics.mergeBuildRejectSource);
+    writeMetric(os, "count.mergeSimulationRejectNotRunnable", metrics.mergeSimulationRejectNotRunnable);
+    writeMetric(os, "count.mergeSimulationRejectUnsafeFlux", metrics.mergeSimulationRejectUnsafeFlux);
+    writeMetric(os, "count.mergeSimulationRejectDisconnected", metrics.mergeSimulationRejectDisconnected);
+    writeMetric(os, "count.mergeSimulationRejectCooling", metrics.mergeSimulationRejectCooling);
+    writeMetric(os, "count.mergeSimulationRejectClusterCount", metrics.mergeSimulationRejectClusterCount);
+    writeMetric(os, "count.mergeSimulationRejectOther", metrics.mergeSimulationRejectOther);
+    writeMetric(os, "count.mergeAcceptedCandidates", metrics.mergeAcceptedCandidates);
+    writeMetric(os, "count.mergeAcceptedPlanarCandidates", metrics.mergeAcceptedPlanarCandidates);
+    writeMetric(os, "count.mergeAcceptedAnyAxisCandidates", metrics.mergeAcceptedAnyAxisCandidates);
+    writeMetric(os, "count.mergeSourcePlacementAttempts", metrics.mergeSourcePlacementAttempts);
+    writeMetric(os, "count.mergeSourceBoundaryRejects", metrics.mergeSourceBoundaryRejects);
+    writeMetric(os, "count.mergeSourceLineRejects", metrics.mergeSourceLineRejects);
+    writeMetric(os, "count.mergeSourceTargetRejects", metrics.mergeSourceTargetRejects);
+    writeMetric(os, "count.mergeSourcePlaced", metrics.mergeSourcePlaced);
 }
 
 void writeCheckpoints(std::ostream& os) {

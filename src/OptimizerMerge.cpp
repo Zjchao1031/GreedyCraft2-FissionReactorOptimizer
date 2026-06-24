@@ -15,17 +15,6 @@
 
 namespace ncfr::optimizer_detail {
 
-Grid cloneSingleFuelGridAs(const Grid& source, int fuelIndex) {
-    Grid grid = source;
-    for (const Pos& pos : grid.interiorPositions()) {
-        Block& block = grid.at(pos.x, pos.y, pos.z);
-        if (block.kind == BlockKind::FuelCell) {
-            block.type = fuelIndex;
-        }
-    }
-    return grid;
-}
-
 bool sameBlockType(const Block& lhs, const Block& rhs) {
     return lhs.kind == rhs.kind && lhs.type == rhs.type;
 }
@@ -62,6 +51,77 @@ struct MergeCandidateScore {
     long long minCoolingMargin = 0;
 };
 
+enum class MergeBuildFailureKind {
+    None,
+    Empty,
+    Size,
+    Conflict,
+    FuelSlot,
+    FuelDuplicate,
+    FuelMissing,
+    Source,
+};
+
+enum class MergePhase {
+    Planar,
+    AnyAxis,
+};
+
+struct MergeBuildResult {
+    std::optional<Grid> grid;
+    MergeBuildFailureKind failure = MergeBuildFailureKind::None;
+};
+
+struct MergeRejectionSummary {
+#ifndef NDEBUG
+    std::vector<int> lhsSlots;
+    std::vector<int> rhsSlots;
+    std::vector<int> requestSlots;
+    size_t lhsSinks = 0;
+    size_t rhsSinks = 0;
+    long long noHeatingSink = 0;
+    long long attempts = 0;
+    long long planarAttempts = 0;
+    long long anyAxisAttempts = 0;
+    long long buildEmpty = 0;
+    long long buildSize = 0;
+    long long buildConflict = 0;
+    long long buildFuelSlot = 0;
+    long long buildFuelDuplicate = 0;
+    long long buildFuelMissing = 0;
+    long long buildSource = 0;
+    long long simNotRunnable = 0;
+    long long simUnsafeFlux = 0;
+    long long simDisconnected = 0;
+    long long simCooling = 0;
+    long long simClusterCount = 0;
+    long long simOther = 0;
+    long long accepted = 0;
+    long long acceptedPlanar = 0;
+    long long acceptedAnyAxis = 0;
+    bool hasBestRejected = false;
+    const char* bestRejectedReason = "none";
+    bool bestRejectedCompatible = false;
+    bool bestRejectedSafeFlux = false;
+    int bestRejectedFuelCells = 0;
+    int bestRejectedRunningCells = 0;
+    int bestRejectedDisconnected = 0;
+    int bestRejectedClusters = 0;
+    int bestRejectedUnsafeFluxCells = 0;
+    long long bestRejectedMargin = std::numeric_limits<long long>::min();
+    long long bestRejectedRawHeating = 0;
+    long long bestRejectedCooling = 0;
+    int bestRejectedA = 0;
+    int bestRejectedB = 0;
+    int bestRejectedC = 0;
+#endif
+};
+
+struct EvaluatedMergeCandidate {
+    Grid grid;
+    FuelSimulation sim;
+};
+
 MergeCandidateScore mergeCandidateScore(const Grid& grid, const FuelSimulation& sim) {
     return {fuelZSpan(grid), gridInteriorVolume(grid), grid.internalC(), sim.minClusterMargin};
 }
@@ -77,6 +137,253 @@ bool isBetterMergeCandidate(const MergeCandidateScore& candidate, const MergeCan
         return candidate.height < currentBest.height;
     }
     return candidate.minCoolingMargin > currentBest.minCoolingMargin;
+}
+
+#ifndef NDEBUG
+std::string slotListLabel(const std::vector<int>& slots) {
+    std::ostringstream os;
+    os << "[";
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (i != 0) {
+            os << ",";
+        }
+        os << slots.at(i);
+    }
+    os << "]";
+    return os.str();
+}
+
+int unsafeFluxCellCount(const Grid& grid, const FuelSimulation& sim) {
+    if (sim.fluxByIndex.size() < static_cast<size_t>(grid.volume()) ||
+        sim.functionalCells.size() < static_cast<size_t>(grid.volume())) {
+        return 0;
+    }
+
+    int count = 0;
+    for (const Pos& pos : grid.interiorPositions()) {
+        const int idx = grid.index(pos.x, pos.y, pos.z);
+        const Block& block = grid.atIndex(idx);
+        if (block.kind != BlockKind::FuelCell || block.type < 0 ||
+            block.type >= static_cast<int>(fuels().size())) {
+            continue;
+        }
+        const Fuel& fuel = fuels().at(static_cast<size_t>(block.type));
+        if (sim.fluxByIndex.at(static_cast<size_t>(idx)) > 2.0 * fuel.criticality + 1e-9) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool betterRejectedMergeSnapshot(const MergeRejectionSummary& candidate,
+                                 const MergeRejectionSummary& current) {
+    if (!current.hasBestRejected) {
+        return true;
+    }
+    if (candidate.bestRejectedRunningCells != current.bestRejectedRunningCells) {
+        return candidate.bestRejectedRunningCells > current.bestRejectedRunningCells;
+    }
+    if (candidate.bestRejectedSafeFlux != current.bestRejectedSafeFlux) {
+        return candidate.bestRejectedSafeFlux;
+    }
+    if ((candidate.bestRejectedDisconnected == 0) != (current.bestRejectedDisconnected == 0)) {
+        return candidate.bestRejectedDisconnected == 0;
+    }
+    if ((candidate.bestRejectedClusters == 1) != (current.bestRejectedClusters == 1)) {
+        return candidate.bestRejectedClusters == 1;
+    }
+    if (candidate.bestRejectedMargin != current.bestRejectedMargin) {
+        return candidate.bestRejectedMargin > current.bestRejectedMargin;
+    }
+    if (candidate.bestRejectedCompatible != current.bestRejectedCompatible) {
+        return candidate.bestRejectedCompatible;
+    }
+    if (candidate.bestRejectedUnsafeFluxCells != current.bestRejectedUnsafeFluxCells) {
+        return candidate.bestRejectedUnsafeFluxCells < current.bestRejectedUnsafeFluxCells;
+    }
+    return candidate.bestRejectedDisconnected < current.bestRejectedDisconnected;
+}
+#endif
+
+void recordMergeBuildFailure(MergeBuildFailureKind failure, MergeRejectionSummary& summary) {
+#ifndef NDEBUG
+    switch (failure) {
+    case MergeBuildFailureKind::Empty:
+        ++summary.buildEmpty;
+        NCFR_PERF_COUNT(mergeBuildRejectEmpty);
+        break;
+    case MergeBuildFailureKind::Size:
+        ++summary.buildSize;
+        NCFR_PERF_COUNT(mergeBuildRejectSize);
+        break;
+    case MergeBuildFailureKind::Conflict:
+        ++summary.buildConflict;
+        NCFR_PERF_COUNT(mergeBuildRejectConflict);
+        break;
+    case MergeBuildFailureKind::FuelSlot:
+        ++summary.buildFuelSlot;
+        NCFR_PERF_COUNT(mergeBuildRejectFuelSlot);
+        break;
+    case MergeBuildFailureKind::FuelDuplicate:
+        ++summary.buildFuelDuplicate;
+        NCFR_PERF_COUNT(mergeBuildRejectFuelDuplicate);
+        break;
+    case MergeBuildFailureKind::FuelMissing:
+        ++summary.buildFuelMissing;
+        NCFR_PERF_COUNT(mergeBuildRejectFuelMissing);
+        break;
+    case MergeBuildFailureKind::Source:
+        ++summary.buildSource;
+        NCFR_PERF_COUNT(mergeBuildRejectSource);
+        break;
+    case MergeBuildFailureKind::None:
+        break;
+    }
+#else
+    (void)failure;
+    (void)summary;
+#endif
+}
+
+void recordMergeSimulationRejection(const Grid& grid, const FuelSimulation& sim,
+                                    MergeRejectionSummary& summary) {
+#ifndef NDEBUG
+    const int clusters = heatingClusterCount(sim);
+    const bool safeFlux = hasSafeFuelFlux(grid, sim);
+    const int unsafeCells = unsafeFluxCellCount(grid, sim);
+    const char* reason = "other";
+    if (sim.fuelCells <= 0 || sim.runningCells < sim.fuelCells) {
+        reason = "notRunnable";
+        ++summary.simNotRunnable;
+        NCFR_PERF_COUNT(mergeSimulationRejectNotRunnable);
+    } else if (!safeFlux) {
+        reason = "unsafeFlux";
+        ++summary.simUnsafeFlux;
+        NCFR_PERF_COUNT(mergeSimulationRejectUnsafeFlux);
+    } else if (sim.disconnectedFunctionalBlocks != 0) {
+        reason = "disconnected";
+        ++summary.simDisconnected;
+        NCFR_PERF_COUNT(mergeSimulationRejectDisconnected);
+    } else if (!sim.compatible || sim.minClusterMargin < 0) {
+        reason = "cooling";
+        ++summary.simCooling;
+        NCFR_PERF_COUNT(mergeSimulationRejectCooling);
+    } else if (clusters != 1) {
+        reason = "clusterCount";
+        ++summary.simClusterCount;
+        NCFR_PERF_COUNT(mergeSimulationRejectClusterCount);
+    } else {
+        ++summary.simOther;
+        NCFR_PERF_COUNT(mergeSimulationRejectOther);
+    }
+
+    MergeRejectionSummary candidate;
+    candidate.hasBestRejected = true;
+    candidate.bestRejectedReason = reason;
+    candidate.bestRejectedCompatible = sim.compatible;
+    candidate.bestRejectedSafeFlux = safeFlux;
+    candidate.bestRejectedFuelCells = sim.fuelCells;
+    candidate.bestRejectedRunningCells = sim.runningCells;
+    candidate.bestRejectedDisconnected = sim.disconnectedFunctionalBlocks;
+    candidate.bestRejectedClusters = clusters;
+    candidate.bestRejectedUnsafeFluxCells = unsafeCells;
+    candidate.bestRejectedMargin = sim.minClusterMargin;
+    candidate.bestRejectedRawHeating = sim.rawHeating;
+    candidate.bestRejectedCooling = sim.cooling;
+    candidate.bestRejectedA = grid.internalA();
+    candidate.bestRejectedB = grid.internalB();
+    candidate.bestRejectedC = grid.internalC();
+    if (betterRejectedMergeSnapshot(candidate, summary)) {
+        summary.hasBestRejected = true;
+        summary.bestRejectedReason = candidate.bestRejectedReason;
+        summary.bestRejectedCompatible = candidate.bestRejectedCompatible;
+        summary.bestRejectedSafeFlux = candidate.bestRejectedSafeFlux;
+        summary.bestRejectedFuelCells = candidate.bestRejectedFuelCells;
+        summary.bestRejectedRunningCells = candidate.bestRejectedRunningCells;
+        summary.bestRejectedDisconnected = candidate.bestRejectedDisconnected;
+        summary.bestRejectedClusters = candidate.bestRejectedClusters;
+        summary.bestRejectedUnsafeFluxCells = candidate.bestRejectedUnsafeFluxCells;
+        summary.bestRejectedMargin = candidate.bestRejectedMargin;
+        summary.bestRejectedRawHeating = candidate.bestRejectedRawHeating;
+        summary.bestRejectedCooling = candidate.bestRejectedCooling;
+        summary.bestRejectedA = candidate.bestRejectedA;
+        summary.bestRejectedB = candidate.bestRejectedB;
+        summary.bestRejectedC = candidate.bestRejectedC;
+    }
+#else
+    (void)grid;
+    (void)sim;
+    (void)summary;
+#endif
+}
+
+void recordMergeAccepted(MergePhase phase, MergeRejectionSummary& summary) {
+#ifndef NDEBUG
+    ++summary.accepted;
+    NCFR_PERF_COUNT(mergeAcceptedCandidates);
+    if (phase == MergePhase::Planar) {
+        ++summary.acceptedPlanar;
+        NCFR_PERF_COUNT(mergeAcceptedPlanarCandidates);
+    } else {
+        ++summary.acceptedAnyAxis;
+        NCFR_PERF_COUNT(mergeAcceptedAnyAxisCandidates);
+    }
+#else
+    (void)phase;
+    (void)summary;
+#endif
+}
+
+void logMergeSummary(const MergeRejectionSummary& summary, const char* result) {
+#ifndef NDEBUG
+    std::ostringstream os;
+    os << "result=" << (result == nullptr ? "unknown" : result)
+       << " lhsSlots=" << slotListLabel(summary.lhsSlots)
+       << " rhsSlots=" << slotListLabel(summary.rhsSlots)
+       << " requestSlots=" << slotListLabel(summary.requestSlots)
+       << " lhsSinks=" << summary.lhsSinks
+       << " rhsSinks=" << summary.rhsSinks
+       << " noHeatingSink=" << summary.noHeatingSink
+       << " attempts=" << summary.attempts
+       << " planarAttempts=" << summary.planarAttempts
+       << " anyAxisAttempts=" << summary.anyAxisAttempts
+       << " buildRejects(empty=" << summary.buildEmpty
+       << ",size=" << summary.buildSize
+       << ",conflict=" << summary.buildConflict
+       << ",fuelSlot=" << summary.buildFuelSlot
+       << ",fuelDuplicate=" << summary.buildFuelDuplicate
+       << ",fuelMissing=" << summary.buildFuelMissing
+       << ",source=" << summary.buildSource
+       << ") simRejects(notRunnable=" << summary.simNotRunnable
+       << ",unsafeFlux=" << summary.simUnsafeFlux
+       << ",disconnected=" << summary.simDisconnected
+       << ",cooling=" << summary.simCooling
+       << ",clusterCount=" << summary.simClusterCount
+       << ",other=" << summary.simOther
+       << ") accepted=" << summary.accepted
+       << " acceptedPlanar=" << summary.acceptedPlanar
+       << " acceptedAnyAxis=" << summary.acceptedAnyAxis;
+    if (summary.hasBestRejected) {
+        os << " bestRejectReason=" << summary.bestRejectedReason
+           << " bestRejectGrid=" << summary.bestRejectedA << "x"
+           << summary.bestRejectedB << "x" << summary.bestRejectedC
+           << " compatible=" << (summary.bestRejectedCompatible ? 1 : 0)
+           << " safeFlux=" << (summary.bestRejectedSafeFlux ? 1 : 0)
+           << " runningCells=" << summary.bestRejectedRunningCells << "/"
+           << summary.bestRejectedFuelCells
+           << " minMargin=" << summary.bestRejectedMargin
+           << " disconnected=" << summary.bestRejectedDisconnected
+           << " clusters=" << summary.bestRejectedClusters
+           << " unsafeFluxCells=" << summary.bestRejectedUnsafeFluxCells
+           << " rawHeating=" << summary.bestRejectedRawHeating
+           << " cooling=" << summary.bestRejectedCooling;
+    }
+    const std::string checkpoint = os.str();
+    NCFR_PERF_CHECKPOINT("merge.summary", checkpoint.c_str());
+#else
+    (void)summary;
+    (void)result;
+#endif
 }
 
 std::vector<Pos> validHeatingSinkPositions(const Grid& grid) {
@@ -117,6 +424,9 @@ struct SubLayout {
     Grid grid;
     std::vector<int> requestSlots;
 };
+
+SubLayout optimizeSingleFuelSubLayoutForSlot(const BuildRequest& request, int slot,
+                                             const std::atomic_bool* cancelRequested);
 
 struct MergedBlock {
     Pos pos;
@@ -173,7 +483,9 @@ std::vector<MergedBlock> copiedInteriorBlocks(const BuildRequest& request, const
     return blocks;
 }
 
-bool openSourceLineToFuel(Grid& grid, const Pos& sourcePos, const Pos& fuelPos, const Direction& dir) {
+bool openSourceLineToFuel(Grid& grid, const BuildRequest& request, const Pos& sourcePos, const Pos& fuelPos,
+                          const Direction& dir) {
+    const Block replacement = sourceLineReplacementBlock(request);
     Pos pos = sourcePos;
     while (true) {
         pos.x -= dir.dx;
@@ -191,7 +503,7 @@ bool openSourceLineToFuel(Grid& grid, const Pos& sourcePos, const Pos& fuelPos, 
             return false;
         }
         if (isFullyReflectiveReflector(block)) {
-            block = {BlockKind::Reflector, 1};
+            block = replacement;
         }
     }
 }
@@ -225,15 +537,18 @@ bool placeMergedSources(Grid& grid, const BuildRequest& request, const std::vect
 
         bool placed = false;
         for (int directionIndex = 0; directionIndex < static_cast<int>(kSourceDirections.size()); ++directionIndex) {
+            NCFR_PERF_COUNT(mergeSourcePlacementAttempts);
             const Direction& dir = kSourceDirections.at(static_cast<size_t>(directionIndex));
             const Pos sourcePos = sourcePositionForDirection(grid, fuelPositions.at(static_cast<size_t>(slot)), dir);
             if (!grid.isBoundary(sourcePos.x, sourcePos.y, sourcePos.z) ||
                 grid.at(sourcePos.x, sourcePos.y, sourcePos.z).kind != BlockKind::Casing) {
+                NCFR_PERF_COUNT(mergeSourceBoundaryRejects);
                 continue;
             }
 
             Grid trial = grid;
-            if (!openSourceLineToFuel(trial, sourcePos, fuelPositions.at(static_cast<size_t>(slot)), dir)) {
+            if (!openSourceLineToFuel(trial, request, sourcePos, fuelPositions.at(static_cast<size_t>(slot)), dir)) {
+                NCFR_PERF_COUNT(mergeSourceLineRejects);
                 continue;
             }
             trial.at(sourcePos.x, sourcePos.y, sourcePos.z) = {BlockKind::Source, -1};
@@ -244,8 +559,10 @@ bool placeMergedSources(Grid& grid, const BuildRequest& request, const std::vect
             if (targetIndex == fuelIndex) {
                 grid = std::move(trial);
                 placed = true;
+                NCFR_PERF_COUNT(mergeSourcePlaced);
                 break;
             }
+            NCFR_PERF_COUNT(mergeSourceTargetRejects);
         }
 
         if (!placed) {
@@ -256,11 +573,11 @@ bool placeMergedSources(Grid& grid, const BuildRequest& request, const std::vect
     return placedSources == requiredSourceCountForSlots(request, requestSlots);
 }
 
-std::optional<Grid> buildMergedGridFromBlocks(const BuildRequest& request,
-                                              const std::vector<MergedBlock>& blocks,
-                                              const std::vector<int>& requestSlots) {
+MergeBuildResult buildMergedGridFromBlocks(const BuildRequest& request,
+                                           const std::vector<MergedBlock>& blocks,
+                                           const std::vector<int>& requestSlots) {
     if (blocks.empty()) {
-        return std::nullopt;
+        return {{}, MergeBuildFailureKind::Empty};
     }
 
     int minX = std::numeric_limits<int>::max();
@@ -282,7 +599,7 @@ std::optional<Grid> buildMergedGridFromBlocks(const BuildRequest& request,
     const int b = maxY - minY + 1;
     const int c = maxZ - minZ + 1;
     if (a <= 0 || b <= 0 || c <= 0 || a > kMaxSize || b > kMaxSize || c > kMaxSize) {
-        return std::nullopt;
+        return {{}, MergeBuildFailureKind::Size};
     }
 
     Grid grid = makeShell(a, b, c);
@@ -294,7 +611,7 @@ std::optional<Grid> buildMergedGridFromBlocks(const BuildRequest& request,
         if (target.kind != BlockKind::Empty) {
             if (isFixedMergedBlock(target) || isFixedMergedBlock(sourceBlock.block) ||
                 !sameBlockType(target, sourceBlock.block)) {
-                return std::nullopt;
+                return {{}, MergeBuildFailureKind::Conflict};
             }
             continue;
         }
@@ -303,11 +620,13 @@ std::optional<Grid> buildMergedGridFromBlocks(const BuildRequest& request,
         if (sourceBlock.block.kind == BlockKind::FuelCell) {
             if (sourceBlock.requestSlot < 0 ||
                 sourceBlock.requestSlot >= static_cast<int>(request.fuelIndices.size())) {
-                return std::nullopt;
+                return {{}, MergeBuildFailureKind::FuelSlot};
             }
-            if (request.fuelIndices.at(static_cast<size_t>(sourceBlock.requestSlot)) != sourceBlock.block.type ||
-                fuelPlaced.at(static_cast<size_t>(sourceBlock.requestSlot))) {
-                return std::nullopt;
+            if (request.fuelIndices.at(static_cast<size_t>(sourceBlock.requestSlot)) != sourceBlock.block.type) {
+                return {{}, MergeBuildFailureKind::FuelSlot};
+            }
+            if (fuelPlaced.at(static_cast<size_t>(sourceBlock.requestSlot))) {
+                return {{}, MergeBuildFailureKind::FuelDuplicate};
             }
             fuelPositions.at(static_cast<size_t>(sourceBlock.requestSlot)) = pos;
             fuelPlaced.at(static_cast<size_t>(sourceBlock.requestSlot)) = true;
@@ -317,86 +636,125 @@ std::optional<Grid> buildMergedGridFromBlocks(const BuildRequest& request,
     for (int slot : requestSlots) {
         if (slot < 0 || slot >= static_cast<int>(fuelPlaced.size()) ||
             !fuelPlaced.at(static_cast<size_t>(slot))) {
-            return std::nullopt;
+            return {{}, MergeBuildFailureKind::FuelMissing};
         }
     }
     if (!placeMergedSources(grid, request, fuelPositions, requestSlots)) {
-        return std::nullopt;
+        return {{}, MergeBuildFailureKind::Source};
     }
-    return grid;
+    MergeBuildResult result;
+    result.grid = std::move(grid);
+    return result;
+}
+
+std::optional<EvaluatedMergeCandidate> tryMergeCandidatesForPhase(
+    const BuildRequest& request, const SubLayout& lhs, const SubLayout& rhs,
+    const std::vector<Pos>& lhsSinks, const std::vector<Pos>& rhsSinks,
+    const std::vector<int>& requestSlots, MergePhase phase,
+    MergeRejectionSummary& summary, const std::atomic_bool* cancelRequested) {
+    std::optional<EvaluatedMergeCandidate> bestPlanarMerge;
+    std::optional<MergeCandidateScore> bestPlanarScore;
+    for (const Pos& lhsSink : lhsSinks) {
+        for (const Pos& rhsSink : rhsSinks) {
+            for (const Direction& dir : kSourceDirections) {
+                throwIfCancelled(cancelRequested);
+                const Pos rhsTranslation{lhsSink.x + dir.dx - rhsSink.x,
+                                         lhsSink.y + dir.dy - rhsSink.y,
+                                         lhsSink.z + dir.dz - rhsSink.z};
+                if (phase == MergePhase::Planar && (dir.dz != 0 || rhsTranslation.z != 0)) {
+                    continue;
+                }
+#ifndef NDEBUG
+                ++summary.attempts;
+#endif
+                NCFR_PERF_COUNT(mergeCandidateAttempts);
+                if (phase == MergePhase::Planar) {
+#ifndef NDEBUG
+                    ++summary.planarAttempts;
+#endif
+                    NCFR_PERF_COUNT(mergePlanarCandidateAttempts);
+                } else {
+#ifndef NDEBUG
+                    ++summary.anyAxisAttempts;
+#endif
+                    NCFR_PERF_COUNT(mergeAnyAxisCandidateAttempts);
+                }
+                std::vector<MergedBlock> blocks = copiedInteriorBlocks(request, lhs, {0, 0, 0});
+                std::vector<MergedBlock> rhsBlocks = copiedInteriorBlocks(request, rhs, rhsTranslation);
+                blocks.insert(blocks.end(), rhsBlocks.begin(), rhsBlocks.end());
+
+                MergeBuildResult merged = buildMergedGridFromBlocks(request, blocks, requestSlots);
+                if (!merged.grid.has_value()) {
+                    recordMergeBuildFailure(merged.failure, summary);
+                    continue;
+                }
+                FuelSimulation sim = simulateMixedFuel(*merged.grid);
+                if (isAccepted(*merged.grid, sim) && heatingClusterCount(sim) == 1) {
+                    recordMergeAccepted(phase, summary);
+                    if (phase == MergePhase::Planar) {
+                        const MergeCandidateScore score = mergeCandidateScore(*merged.grid, sim);
+                        if (!bestPlanarScore.has_value() || isBetterMergeCandidate(score, *bestPlanarScore)) {
+                            NCFR_PERF_COUNT(bestUpdates);
+                            bestPlanarScore = score;
+                            EvaluatedMergeCandidate candidate{std::move(*merged.grid), std::move(sim)};
+                            bestPlanarMerge = std::move(candidate);
+                        }
+                    } else {
+                        NCFR_PERF_COUNT(bestUpdates);
+                        EvaluatedMergeCandidate candidate{std::move(*merged.grid), std::move(sim)};
+                        return candidate;
+                    }
+                    continue;
+                }
+                recordMergeSimulationRejection(*merged.grid, sim, summary);
+            }
+        }
+    }
+    return bestPlanarMerge;
 }
 
 std::optional<Grid> tryMergeLayoutGrids(const BuildRequest& request, const SubLayout& lhs,
                                         const SubLayout& rhs,
                                         const std::atomic_bool* cancelRequested) {
+    NCFR_PERF_COUNT(mergeLayoutCalls);
+    MergeRejectionSummary summary;
+    const std::vector<int> requestSlots = mergedRequestSlots(lhs, rhs);
+#ifndef NDEBUG
+    summary.lhsSlots = lhs.requestSlots;
+    summary.rhsSlots = rhs.requestSlots;
+    summary.requestSlots = requestSlots;
+#endif
+
     const std::vector<Pos> lhsSinks = validHeatingSinkPositions(lhs.grid);
     const std::vector<Pos> rhsSinks = validHeatingSinkPositions(rhs.grid);
+#ifndef NDEBUG
+    summary.lhsSinks = lhsSinks.size();
+    summary.rhsSinks = rhsSinks.size();
+#endif
     if (lhsSinks.empty() || rhsSinks.empty()) {
+#ifndef NDEBUG
+        ++summary.noHeatingSink;
+#endif
+        NCFR_PERF_COUNT(mergeNoHeatingSinkRejects);
+        logMergeSummary(summary, "noHeatingSink");
         return std::nullopt;
     }
 
-    const std::vector<int> requestSlots = mergedRequestSlots(lhs, rhs);
-    std::optional<Grid> bestPlanarMerge;
-    std::optional<MergeCandidateScore> bestPlanarScore;
-
-    for (const Pos& lhsSink : lhsSinks) {
-        for (const Pos& rhsSink : rhsSinks) {
-            for (const Direction& dir : kSourceDirections) {
-                throwIfCancelled(cancelRequested);
-                const Pos rhsTranslation{lhsSink.x + dir.dx - rhsSink.x,
-                                         lhsSink.y + dir.dy - rhsSink.y,
-                                         lhsSink.z + dir.dz - rhsSink.z};
-                if (dir.dz != 0 || rhsTranslation.z != 0) {
-                    continue;
-                }
-                std::vector<MergedBlock> blocks = copiedInteriorBlocks(request, lhs, {0, 0, 0});
-                std::vector<MergedBlock> rhsBlocks = copiedInteriorBlocks(request, rhs, rhsTranslation);
-                blocks.insert(blocks.end(), rhsBlocks.begin(), rhsBlocks.end());
-
-                std::optional<Grid> merged = buildMergedGridFromBlocks(request, blocks, requestSlots);
-                if (!merged.has_value()) {
-                    continue;
-                }
-                FuelSimulation sim = simulateMixedFuel(*merged);
-                if (isAccepted(*merged, sim) && heatingClusterCount(sim) == 1) {
-                    const MergeCandidateScore score = mergeCandidateScore(*merged, sim);
-                    if (!bestPlanarScore.has_value() || isBetterMergeCandidate(score, *bestPlanarScore)) {
-                        NCFR_PERF_COUNT(bestUpdates);
-                        bestPlanarScore = score;
-                        bestPlanarMerge = std::move(merged);
-                    }
-                }
-            }
-        }
+    if (std::optional<EvaluatedMergeCandidate> planar = tryMergeCandidatesForPhase(
+            request, lhs, rhs, lhsSinks, rhsSinks, requestSlots, MergePhase::Planar,
+            summary, cancelRequested)) {
+        logMergeSummary(summary, "acceptedPlanar");
+        return std::move(planar->grid);
     }
 
-    if (bestPlanarMerge.has_value()) {
-        return bestPlanarMerge;
+    if (std::optional<EvaluatedMergeCandidate> anyAxis = tryMergeCandidatesForPhase(
+            request, lhs, rhs, lhsSinks, rhsSinks, requestSlots, MergePhase::AnyAxis,
+            summary, cancelRequested)) {
+        logMergeSummary(summary, "acceptedAnyAxis");
+        return std::move(anyAxis->grid);
     }
 
-    for (const Pos& lhsSink : lhsSinks) {
-        for (const Pos& rhsSink : rhsSinks) {
-            for (const Direction& dir : kSourceDirections) {
-                throwIfCancelled(cancelRequested);
-                const Pos rhsTranslation{lhsSink.x + dir.dx - rhsSink.x,
-                                         lhsSink.y + dir.dy - rhsSink.y,
-                                         lhsSink.z + dir.dz - rhsSink.z};
-                std::vector<MergedBlock> blocks = copiedInteriorBlocks(request, lhs, {0, 0, 0});
-                std::vector<MergedBlock> rhsBlocks = copiedInteriorBlocks(request, rhs, rhsTranslation);
-                blocks.insert(blocks.end(), rhsBlocks.begin(), rhsBlocks.end());
-
-                std::optional<Grid> merged = buildMergedGridFromBlocks(request, blocks, requestSlots);
-                if (!merged.has_value()) {
-                    continue;
-                }
-                FuelSimulation sim = simulateMixedFuel(*merged);
-                if (isAccepted(*merged, sim) && heatingClusterCount(sim) == 1) {
-                    NCFR_PERF_COUNT(bestUpdates);
-                    return merged;
-                }
-            }
-        }
-    }
+    logMergeSummary(summary, "rejected");
     return std::nullopt;
 }
 
@@ -413,44 +771,16 @@ std::optional<OptimizationResult> tryMergeDualLayouts(const BuildRequest& reques
 }
 
 OptimizationResult optimizeDualFuelLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested) {
-    const bool sameStartupType =
-        fuels().at(static_cast<size_t>(request.fuelIndices.at(0))).selfPriming ==
-        fuels().at(static_cast<size_t>(request.fuelIndices.at(1))).selfPriming;
+    if (request.fuelIndices.size() != 2) {
+        throw std::invalid_argument("双燃料策略需要 2 个燃料单元。");
+    }
 
-    if (sameStartupType) {
-        const int primarySlot = primarySameStartupSlot(request);
-        const int secondarySlot = 1 - primarySlot;
-        OptimizationResult primaryResult = optimizeSingleFuelForSlot(request, primarySlot, cancelRequested);
-        SubLayout primary{primaryResult.grid, {primarySlot}};
-        SubLayout secondary{cloneSingleFuelGridAs(primaryResult.grid,
-                                                  request.fuelIndices.at(static_cast<size_t>(secondarySlot))),
-                            {secondarySlot}};
-        const FuelSimulation clonedSecondarySim = simulateMixedFuel(secondary.grid);
-        if (isAccepted(secondary.grid, clonedSecondarySim)) {
-            if (std::optional<OptimizationResult> merged =
-                    tryMergeDualLayouts(request, primary, secondary, cancelRequested);
-                merged.has_value()) {
-                return std::move(*merged);
-            }
-        }
-
-        OptimizationResult secondaryResult = optimizeSingleFuelForSlot(request, secondarySlot, cancelRequested);
-        secondary = {std::move(secondaryResult.grid), {secondarySlot}};
-        if (std::optional<OptimizationResult> merged =
-                tryMergeDualLayouts(request, primary, secondary, cancelRequested);
-            merged.has_value()) {
-            return std::move(*merged);
-        }
-    } else {
-        OptimizationResult firstResult = optimizeSingleFuelForSlot(request, 0, cancelRequested);
-        OptimizationResult secondResult = optimizeSingleFuelForSlot(request, 1, cancelRequested);
-        SubLayout first{std::move(firstResult.grid), {0}};
-        SubLayout second{std::move(secondResult.grid), {1}};
-        if (std::optional<OptimizationResult> merged =
-                tryMergeDualLayouts(request, first, second, cancelRequested);
-            merged.has_value()) {
-            return std::move(*merged);
-        }
+    SubLayout first = optimizeSingleFuelSubLayoutForSlot(request, 0, cancelRequested);
+    SubLayout second = optimizeSingleFuelSubLayoutForSlot(request, 1, cancelRequested);
+    if (std::optional<OptimizationResult> merged =
+            tryMergeDualLayouts(request, first, second, cancelRequested);
+        merged.has_value()) {
+        return std::move(*merged);
     }
 
     throw std::runtime_error("无满足双燃料输入要求的合并方案。");

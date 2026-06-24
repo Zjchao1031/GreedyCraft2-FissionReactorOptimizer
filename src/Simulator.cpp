@@ -173,7 +173,7 @@ void traceLine(const Grid& grid, const Fuel& fuel, const Pos& from, const int di
             markCompletedFluxSinkLine(lineModerators, lineShields, usedModerators, shieldFluxByIndex);
             return;
         }
-        if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 && moderatorCount <= kNeutronReach / 2) {
+        if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 && moderatorCount <= kNeutronReach) {
             const auto& reflector = reflectorTypes().at(static_cast<size_t>(targetBlock.type));
             usedReflectors.at(static_cast<size_t>(targetIndex)) = true;
             const double reflectedFlux = std::floor(2.0 * lineFlux * reflector.reflectivity);

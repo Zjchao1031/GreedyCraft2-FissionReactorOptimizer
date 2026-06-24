@@ -254,13 +254,13 @@ void validateRequest(const BuildRequest& request) {
     for (int index : request.fuelIndices) {
         validateIndex(index, static_cast<int>(fuels().size()), "燃料");
     }
+    if (request.selectedModeratorTypeIndices.empty()) {
+        throw std::invalid_argument("结构生成需要至少选择一个减速剂。");
+    }
+    if (request.selectedReflectorTypeIndices.empty()) {
+        throw std::invalid_argument("结构生成需要至少选择一个中子反射器。");
+    }
     if (request.fuelIndices.size() == 5) {
-        if (request.selectedModeratorTypeIndices.empty()) {
-            throw std::invalid_argument("辐照结构生成需要至少选择一个减速剂。");
-        }
-        if (request.selectedReflectorTypeIndices.empty()) {
-            throw std::invalid_argument("辐照结构生成需要至少选择一个中子反射器。");
-        }
         validateIndex(request.irradiatorRecipeIndex, static_cast<int>(irradiatorRecipeTypes().size()), "辐照配方");
     }
     for (int index : request.selectedModeratorTypeIndices) {
@@ -501,12 +501,23 @@ int strongestModeratorType(const std::vector<int>& moderatorTypeIndices) {
     return bestType;
 }
 
-void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions) {
+bool isProtectedPosition(const StateVector* protectedPositions, int idx) {
+    return protectedPositions != nullptr &&
+           idx >= 0 &&
+           static_cast<size_t>(idx) < protectedPositions->size() &&
+           protectedPositions->at(static_cast<size_t>(idx));
+}
+
+void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions,
+                       const StateVector* protectedPositions) {
     NCFR_PERF_COUNT(fillSupportCalls);
     NCFR_PERF_SCOPE(fillSupportNs);
     const SupportBlockOptions& support = effectiveSupportBlockOptions(supportOptions);
     const int moderatorType = strongestModeratorType(support.moderatorTypeIndices);
     for (const Pos& pos : grid.interiorPositions()) {
+        if (isProtectedPosition(protectedPositions, grid.index(pos.x, pos.y, pos.z))) {
+            continue;
+        }
         Block& block = grid.at(pos.x, pos.y, pos.z);
         if (block.kind != BlockKind::Empty) {
             continue;
@@ -519,6 +530,9 @@ void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions) {
     }
 
     for (const Pos& pos : grid.interiorPositions()) {
+        if (isProtectedPosition(protectedPositions, grid.index(pos.x, pos.y, pos.z))) {
+            continue;
+        }
         Block& block = grid.at(pos.x, pos.y, pos.z);
         if (block.kind != BlockKind::Empty) {
             continue;
@@ -545,6 +559,9 @@ void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions) {
         RuleContext context = optimisticRuleContext(grid, validSinks, functionalCells, activeModerators, activeReflectors,
                                                     functionalShields, functionalIrradiators);
         for (const Pos& pos : grid.interiorPositions()) {
+            if (isProtectedPosition(protectedPositions, grid.index(pos.x, pos.y, pos.z))) {
+                continue;
+            }
             Block& block = grid.at(pos.x, pos.y, pos.z);
             if (block.kind != BlockKind::Empty) {
                 continue;
@@ -780,7 +797,7 @@ std::vector<Block> replacementBlocks(const SupportBlockOptions* supportOptions) 
 
 bool isPreCompactRunnable(const FuelSimulation& sim);
 bool restoreDirectionalFuelLines(Grid& grid, const BuildRequest& request, const std::vector<int>& sourceDirections,
-                                 const std::vector<int>& reflectorDirections);
+                                 const std::vector<FuelLineSpec>& fuelLines);
 
 bool isSupportMutable(const Block& block) {
     return block.kind == BlockKind::Empty || block.kind == BlockKind::Sink || block.kind == BlockKind::Shield ||
@@ -806,6 +823,30 @@ bool isRequiredSupportBlock(const Grid& grid, const FuelSimulation& sim, int idx
 
 int countFunctionalIrradiators(const FuelSimulation& sim) {
     return static_cast<int>(std::count(sim.functionalIrradiators.begin(), sim.functionalIrradiators.end(), true));
+}
+
+bool removeInvalidSinks(Grid& grid, const FuelSimulation& sim) {
+    bool removed = false;
+    for (const Pos& pos : grid.interiorPositions()) {
+        const int idx = grid.index(pos.x, pos.y, pos.z);
+        Block& block = grid.atIndex(idx);
+        if (block.kind == BlockKind::Sink && !sim.validSinks.at(static_cast<size_t>(idx))) {
+            block = {BlockKind::Empty, -1};
+            removed = true;
+        }
+    }
+    return removed;
+}
+
+bool hasInvalidSinks(const Grid& grid, const FuelSimulation& sim) {
+    for (const Pos& pos : grid.interiorPositions()) {
+        const int idx = grid.index(pos.x, pos.y, pos.z);
+        const Block& block = grid.atIndex(idx);
+        if (block.kind == BlockKind::Sink && !sim.validSinks.at(static_cast<size_t>(idx))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int countUsefulBlocks(const Grid& grid) {
@@ -947,7 +988,8 @@ bool betterScore(const CandidateScore& lhs, const CandidateScore& rhs) {
     return lhs.usefulBlocks < rhs.usefulBlocks;
 }
 
-std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& sim, const ImproveOptions& options) {
+std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& sim, const ImproveOptions& options,
+                                      const StateVector* protectedPositions, bool emptyOnly) {
     StateVector marked(static_cast<size_t>(grid.volume()), false);
     std::vector<Pos> positions;
     std::deque<std::pair<int, int>> queue;
@@ -977,7 +1019,9 @@ std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& si
                 return;
             }
             marked.at(static_cast<size_t>(nIdx)) = true;
-            if (isSupportMutable(grid.atIndex(nIdx)) && positions.size() < options.frontierLimit) {
+            if (!isProtectedPosition(protectedPositions, nIdx) &&
+                (!emptyOnly || grid.atIndex(nIdx).kind == BlockKind::Empty) &&
+                isSupportMutable(grid.atIndex(nIdx)) && positions.size() < options.frontierLimit) {
                 positions.push_back(n);
             }
             if (distance + 1 < options.frontierRadius) {
@@ -993,7 +1037,9 @@ std::vector<Pos> improvementPositions(const Grid& grid, const FuelSimulation& si
 
 Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
                           const ImproveOptions& options,
-                          const SupportBlockOptions* supportOptions) {
+                          const SupportBlockOptions* supportOptions,
+                          const StateVector* protectedPositions,
+                          bool emptyOnly) {
     NCFR_PERF_COUNT(improveCalls);
     NCFR_PERF_SCOPE(improveNs);
     const std::vector<Block> blocks = replacementBlocks(supportOptions);
@@ -1002,7 +1048,7 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
         NCFR_PERF_COUNT(improvePasses);
         FuelSimulation baseSim = simulateMixedFuel(grid);
         CandidateScore bestScore = scoreSimulation(grid, baseSim);
-        std::vector<Pos> positions = improvementPositions(grid, baseSim, options);
+        std::vector<Pos> positions = improvementPositions(grid, baseSim, options, protectedPositions, emptyOnly);
         NCFR_PERF_ADD(improveFrontierPositions, positions.size());
         if (positions.empty()) {
             break;
@@ -1013,6 +1059,9 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
         for (const Pos& pos : positions) {
             throwIfCancelled(cancelRequested);
             const Block original = grid.at(pos.x, pos.y, pos.z);
+            if (emptyOnly && original.kind != BlockKind::Empty) {
+                continue;
+            }
             for (const Block& replacement : blocks) {
                 throwIfCancelled(cancelRequested);
                 if (original.kind == replacement.kind && original.type == replacement.type) {
@@ -1045,14 +1094,20 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
 }
 
 OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, const FuelSimulation& sim) {
-    FuelSimulation finalSim = sim;
-    const int originalInternalB = grid.internalB();
+    (void)sim;
     Grid finalGrid = compactEmptyInteriorPlanes(std::move(grid));
-    if (finalGrid.internalB() != originalInternalB) {
+    FuelSimulation finalSim = simulateMixedFuel(finalGrid);
+
+    for (int pass = 0; pass < 24 && hasInvalidSinks(finalGrid, finalSim); ++pass) {
+        removeInvalidSinks(finalGrid, finalSim);
+        finalGrid = compactEmptyInteriorPlanes(std::move(finalGrid));
         finalSim = simulateMixedFuel(finalGrid);
-        if (!isSafeOperatingSimulation(finalGrid, finalSim)) {
-            throw std::runtime_error("高度压缩后方案不再满足安全运行判定。");
-        }
+    }
+    if (hasInvalidSinks(finalGrid, finalSim)) {
+        throw std::runtime_error("最终方案仍包含无效散热器，无法导出。");
+    }
+    if (!isSafeOperatingSimulation(finalGrid, finalSim)) {
+        throw std::runtime_error("最终压缩并剔除无效散热器后方案不再满足安全运行判定。");
     }
 
     addFuelCellPorts(finalGrid, request);
