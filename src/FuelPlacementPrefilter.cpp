@@ -1,6 +1,7 @@
 #include "FuelPlacementPrefilter.h"
 
 #include "Data.h"
+#include "NeutronRules.h"
 #include "Optimizer.h"
 #include "Simulator.h"
 #include "StateVector.h"
@@ -14,7 +15,6 @@
 namespace ncfr {
 namespace {
 
-constexpr int kNeutronReach = 4;
 constexpr double kFluxEpsilon = 1e-9;
 
 struct Direction {
@@ -163,7 +163,7 @@ void traceFuelRelationLine(const Grid& grid, const Fuel& fuel, const Pos& from, 
             return;
         }
         if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 &&
-            moderatorCount <= kNeutronReach) {
+            step <= kMaxReflectorLineModerators) {
             const auto& reflector = reflectorTypes().at(static_cast<size_t>(targetBlock.type));
             fluxByIndex.at(static_cast<size_t>(fromIndex)) += std::floor(2.0 * lineFlux * reflector.reflectivity);
             return;
@@ -202,10 +202,10 @@ const std::vector<FuelActivationProfile>& fuelActivationProfiles() {
         std::vector<FuelActivationProfile> result;
         result.reserve(fuels().size());
         const double heavyWaterFlux = moderatorTypes().at(2).fluxFactor;
-        const double fullReflectorFlux =
-            std::floor(2.0 * heavyWaterFlux * reflectorTypes().at(0).reflectivity);
-        const double halfReflectorFlux =
-            std::floor(2.0 * heavyWaterFlux * reflectorTypes().at(1).reflectivity);
+        const double fullReflectorFlux = std::floor(
+            2.0 * kMaxReflectorLineModerators * heavyWaterFlux * reflectorTypes().at(0).reflectivity);
+        const double halfReflectorFlux = std::floor(
+            2.0 * kMaxReflectorLineModerators * heavyWaterFlux * reflectorTypes().at(1).reflectivity);
         for (int index = 0; index < static_cast<int>(fuels().size()); ++index) {
             const Fuel& fuel = fuels().at(static_cast<size_t>(index));
             result.push_back({index,

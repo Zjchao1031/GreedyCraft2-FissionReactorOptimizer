@@ -1,5 +1,7 @@
 #include "OptimizerDetail.h"
 
+#include "FuelSpecialCases.h"
+#include "NeutronRules.h"
 #include "Perf.h"
 
 #include <algorithm>
@@ -16,7 +18,6 @@
 
 namespace ncfr::optimizer_detail {
 
-constexpr int kMaxSingleFuelLineModerators = 4;
 constexpr double kFluxEpsilon = 1e-9;
 constexpr long long kSpecialManaDustCoolingDeficit = 640;
 
@@ -41,15 +42,9 @@ struct SingleFuelSkeletonSearch {
     int targetLineCount = 1;
 };
 
-bool isSpecialManaDustFuel(const Fuel& fuel) {
-    return fuel.nameEn == "IPE-254 TRISO Fuel Pebble" ||
-           fuel.nameEn == "IPE-254 Oxide Fuel Pellet" ||
-           fuel.nameEn == "UEE-254 Zirconium Alloy Fuel Pellet";
-}
-
 bool isSpecialManaDustRequest(const BuildRequest& request) {
     return request.fuelIndices.size() == 1 &&
-           isSpecialManaDustFuel(fuels().at(static_cast<size_t>(request.fuelIndices.front())));
+           usesSpecialManaDustCornerSinks(fuels().at(static_cast<size_t>(request.fuelIndices.front())));
 }
 
 bool hasSpecialManaDustCoolingDeficit(const FuelSimulation& sim) {
@@ -72,6 +67,10 @@ double estimatedLineFlux(const Fuel& fuel, int moderatorType, int moderatorCount
     const auto& reflector = reflectorTypes().at(static_cast<size_t>(reflectorType));
     const double lineFlux = fuel.intrinsicFlux + moderator.fluxFactor * moderatorCount;
     return std::floor(2.0 * lineFlux * reflector.reflectivity);
+}
+
+bool fuelLineWithinReflectorReach(const FuelLineSpec& line) {
+    return line.moderatorCount >= 1 && line.moderatorCount <= kMaxReflectorLineModerators;
 }
 
 std::vector<int> lineDirections(const std::vector<FuelLineSpec>& lines) {
@@ -196,6 +195,9 @@ std::optional<BuiltSingleFuelSkeleton> buildSingleFuelSkeleton(const Dimension& 
     markProtected(protectedPositions, grid, fuelPos);
 
     for (const FuelLineSpec& line : spec.lines) {
+        if (!fuelLineWithinReflectorReach(line)) {
+            return std::nullopt;
+        }
         const Direction& dir = kSourceDirections.at(static_cast<size_t>(line.direction));
         for (int distance = 1; distance <= line.moderatorCount; ++distance) {
             const Pos moderatorPos = offset(fuelPos, dir, distance);
@@ -287,6 +289,9 @@ bool restoreDirectionalFuelLines(Grid& grid, const BuildRequest& request, const 
 
     const Pos fuelPos = fuelPositions.front();
     for (const FuelLineSpec& line : fuelLines) {
+        if (!fuelLineWithinReflectorReach(line)) {
+            return false;
+        }
         const Direction& dir = kSourceDirections.at(static_cast<size_t>(line.direction));
         for (int distance = 1; distance <= line.moderatorCount; ++distance) {
             const Pos moderatorPos = offset(fuelPos, dir, distance);
@@ -600,7 +605,7 @@ std::vector<FuelLineSpec> singleFuelLineOptions(const Fuel& fuel, const BuildReq
             continue;
         }
         for (int moderatorType : request.selectedModeratorTypeIndices) {
-            for (int moderators = 1; moderators <= kMaxSingleFuelLineModerators; ++moderators) {
+            for (int moderators = 1; moderators <= kMaxReflectorLineModerators; ++moderators) {
                 const double flux = estimatedLineFlux(fuel, moderatorType, moderators, reflectorType);
                 if (flux > 2.0 * fuel.criticality + kFluxEpsilon) {
                     continue;

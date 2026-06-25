@@ -1,5 +1,6 @@
 #include "OptimizerDetail.h"
 
+#include "NeutronRules.h"
 #include "Perf.h"
 
 #include <array>
@@ -18,6 +19,7 @@ namespace {
 constexpr int kIrradiatorInteriorSize = 17;
 constexpr int kIrradiatorCenter = 9;
 constexpr int kIrradiatorFuelInputCount = 5;
+constexpr int kIrradiatorFuelDistance = kMaxIrradiatorLineModerators + 1;
 constexpr int kAnySource = -1;
 constexpr double kActivationFluxEpsilon = 1e-9;
 constexpr ImproveOptions kIrradiatorImproveOptions{1, 1, 64};
@@ -297,6 +299,12 @@ std::vector<ActivationLine> activationLineOptionsForDirection(
     return options;
 }
 
+bool activationLinesWithinReflectorReach(const ActivationPlan& activation) {
+    return std::all_of(activation.lines.begin(), activation.lines.end(), [](const ActivationLine& line) {
+        return static_cast<int>(line.moderatorTypes.size()) <= kMaxReflectorLineModerators;
+    });
+}
+
 int activationModeratorCount(const ActivationPlan& plan) {
     int count = 0;
     for (const ActivationLine& line : plan.lines) {
@@ -548,7 +556,7 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
             continue;
         }
 
-        for (int distance = 1; distance <= 4; ++distance) {
+        for (int distance = 1; distance <= kMaxIrradiatorLineModerators; ++distance) {
             if (!addFixedBlock(skeleton, offset(center, dir, distance),
                                {BlockKind::Moderator, centerModeratorType})) {
                 throw std::runtime_error("中心高通量减速剂骨架发生方块冲突。");
@@ -556,7 +564,7 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
         }
 
         const int fuelIndex = request.fuelIndices.at(fuelInputIndex++);
-        const Pos fuelPos = offset(center, dir, 5);
+        const Pos fuelPos = offset(center, dir, kIrradiatorFuelDistance);
         skeleton.fuelPositions.at(static_cast<size_t>(directionIndex)) = fuelPos;
         if (!addFixedBlock(skeleton, fuelPos, {BlockKind::FuelCell, fuelIndex})) {
             throw std::runtime_error("中心辐照仓燃料单元骨架发生方块冲突。");
@@ -572,6 +580,9 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
                << fuel.criticality << "，允许上限 " << 2.0 * fuel.criticality
                << "。";
             throw std::runtime_error(os.str());
+        }
+        if (!activationLinesWithinReflectorReach(*activation)) {
+            throw std::runtime_error("燃料外侧动态维持临界反射线超过 2 个减速剂。");
         }
         skeleton.activations.at(static_cast<size_t>(directionIndex)) = *activation;
 

@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "Data.h"
+#include "FuelSpecialCases.h"
 #include "ReactorGridWidget.h"
 #include "Simulator.h"
 
@@ -88,11 +89,6 @@ QString fromUtf8String(const std::string& text) {
 
 QString replacementFailureMessage(const QString& reason) {
     return QString::fromUtf8("此燃料无法满足反应堆运行要求！原因：\n%1").arg(reason);
-}
-
-bool isBlockedNormalSingleFuel(const ncfr::Fuel& fuel) {
-    return fuel.nameEn == "WGE-254 Zirconium Alloy Fuel Pellet" ||
-           fuel.nameEn == "IPE-254 Zirconium Alloy Fuel Pellet";
 }
 
 class CheckedComboBox final : public QComboBox {
@@ -1231,10 +1227,10 @@ void MainWindow::generateLayout(const FuelInputControls& controls) {
     if (controls.fixedFuelCellCount == 0 && request.fuelIndices.size() == 1) {
         const int fuelIndex = request.fuelIndices.front();
         if (fuelIndex >= 0 && fuelIndex < static_cast<int>(ncfr::fuels().size()) &&
-            isBlockedNormalSingleFuel(ncfr::fuels().at(static_cast<size_t>(fuelIndex)))) {
+            ncfr::blocksNormalSingleFuelGeneration(ncfr::fuels().at(static_cast<size_t>(fuelIndex)))) {
             QMessageBox::warning(
                 this,
-                QString::fromUtf8("燃料发热过高"),
+                QString::fromUtf8("燃料不适用于普通单燃料结构"),
                 QString::fromUtf8(
                     "此种燃料基础发热值过大，采用单种燃料的输入方式难以生成满足要求的结构，建议采用低发热+高发热的输入组合以降低平均发热。"));
             return;

@@ -1,6 +1,7 @@
 #include "Simulator.h"
 
 #include "Perf.h"
+#include "NeutronRules.h"
 #include "Rule.h"
 
 #include <algorithm>
@@ -11,7 +12,6 @@
 namespace ncfr {
 namespace {
 
-constexpr int kNeutronReach = 4;
 constexpr int kFissionMaxSize = 24;
 
 struct ShieldLineUse {
@@ -173,7 +173,8 @@ void traceLine(const Grid& grid, const Fuel& fuel, const Pos& from, const int di
             markCompletedFluxSinkLine(lineModerators, lineShields, usedModerators, shieldFluxByIndex);
             return;
         }
-        if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 && moderatorCount <= kNeutronReach) {
+        if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 &&
+            step <= kMaxReflectorLineModerators) {
             const auto& reflector = reflectorTypes().at(static_cast<size_t>(targetBlock.type));
             usedReflectors.at(static_cast<size_t>(targetIndex)) = true;
             const double reflectedFlux = std::floor(2.0 * lineFlux * reflector.reflectivity);
