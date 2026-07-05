@@ -351,11 +351,6 @@ std::vector<CoolingExpansionCandidate> coolingExpansionCandidates(
     return candidates;
 }
 
-bool preservesDirectionalCandidate(const Grid& grid, const FuelSimulation& sim, const BuildRequest& request) {
-    (void)request;
-    return isPreCompactRunnable(sim) && hasSafeFuelFlux(grid, sim) && sim.disconnectedFunctionalBlocks == 0;
-}
-
 bool coolingExpansionStartAllowed(const Grid& grid, const FuelSimulation& sim,
                                   bool allowDisconnectedFunctionalBlocks) {
     return isPreCompactRunnable(sim) && hasSafeFuelFlux(grid, sim) &&

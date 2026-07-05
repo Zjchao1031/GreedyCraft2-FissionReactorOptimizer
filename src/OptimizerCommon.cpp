@@ -304,31 +304,6 @@ std::vector<Dimension> sortedDimensions() {
     return dims;
 }
 
-[[maybe_unused]] std::vector<Dimension> maxFirstDimensions() {
-    std::vector<Dimension> dims = sortedDimensions();
-    std::sort(dims.begin(), dims.end(), [](const Dimension& lhs, const Dimension& rhs) {
-        const int lhsVolume = dimensionVolume(lhs);
-        const int rhsVolume = dimensionVolume(rhs);
-        if (lhsVolume != rhsVolume) {
-            return lhsVolume > rhsVolume;
-        }
-        const int lhsSpread = dimensionSpread(lhs);
-        const int rhsSpread = dimensionSpread(rhs);
-        if (lhsSpread != rhsSpread) {
-            return lhsSpread < rhsSpread;
-        }
-        const int lhsSurface = dimensionSurface(lhs);
-        const int rhsSurface = dimensionSurface(rhs);
-        if (lhsSurface != rhsSurface) {
-            return lhsSurface < rhsSurface;
-        }
-        if (lhs.a != rhs.a) return lhs.a < rhs.a;
-        if (lhs.b != rhs.b) return lhs.b < rhs.b;
-        return lhs.c < rhs.c;
-    });
-    return dims;
-}
-
 int adjacentCells(const Grid& grid, const Pos& pos) {
     int count = 0;
     grid.forEachNeighbor6(pos, [&](const Pos& n) {
