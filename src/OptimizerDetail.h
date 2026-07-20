@@ -50,6 +50,7 @@ struct CoolingExpansionOptions {
     size_t bridgeTargetCandidateLimit = 128;
     size_t bridgeCandidateLimit = 128;
     size_t bridgeSinkTypeLimit = 4;
+    long long handoffCoolingDeficit = -1;
 };
 
 struct SupportBlockOptions {
@@ -71,6 +72,7 @@ enum class FinalizeFailureKind {
     UnsafeFlux,
     CoolingDeficit,
     Disconnected,
+    WallDisconnected,
     Structural
 };
 
@@ -121,7 +123,9 @@ void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions = n
                        const StateVector* protectedPositions = nullptr);
 std::vector<Pos> fuelPositionsInGrid(const Grid& grid);
 bool allSourcesTargetFuel(const Grid& grid);
+bool hasRequiredSources(const Grid& grid, const BuildRequest& request);
 bool hasNoEmptyInteriorPlane(const Grid& grid);
+Grid compactEmptyInteriorPlanes(Grid grid);
 std::vector<Block> replacementBlocks(const SupportBlockOptions* supportOptions = nullptr);
 bool isSupportMutable(const Block& block);
 bool isRequiredSupportBlock(const Grid& grid, const FuelSimulation& sim, int idx);
@@ -149,7 +153,9 @@ Grid expandCoolingWithPreserver(Grid grid, const std::function<bool(Grid&)>& pre
                                 bool allowDisconnectedFunctionalBlocks = false);
 
 OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, const FuelSimulation& sim);
-bool isAccepted(const Grid& grid, const FuelSimulation& sim);
+bool isSearchAccepted(const Grid& grid, const FuelSimulation& sim);
+bool isFinalReactorValidInternal(const Grid& grid, const BuildRequest& request,
+                                 const FuelSimulation& sim);
 bool isPreCompactRunnable(const FuelSimulation& sim);
 FinalizeFailureKind classifyFinalizationFailure(const Grid& grid, const FuelSimulation& sim,
                                                 const BuildRequest& request);
@@ -160,7 +166,7 @@ bool containsDirectionIndex(const std::vector<int>& indices, int index);
 Pos offset(const Pos& pos, const Direction& dir, int distance);
 Pos sourcePositionForDirection(const Grid& grid, const Pos& fuelPos, const Direction& dir);
 std::vector<std::vector<int>> sourceDirectionCombinations(int sourceCount);
-std::vector<Dimension> singleFuelSearchDimensions(const FuelActivationProfile& profile);
+std::vector<Dimension> singleFuelSearchDimensions();
 bool placeDirectionalSources(Grid& grid, const BuildRequest& request, const Pos& fuelPos,
                              const std::vector<int>& sourceDirections);
 bool isFullyReflectiveReflector(const Block& block);

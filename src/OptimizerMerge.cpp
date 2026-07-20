@@ -689,19 +689,64 @@ std::optional<EvaluatedMergeCandidate> tryMergeCandidatesForPhase(
                     continue;
                 }
                 FuelSimulation sim = simulateMixedFuel(*merged.grid);
-                if (isAccepted(*merged.grid, sim) && heatingClusterCount(sim) == 1) {
+                if (isSearchAccepted(*merged.grid, sim) && heatingClusterCount(sim) == 1) {
+                    Grid acceptedGrid = std::move(*merged.grid);
+                    FuelSimulation acceptedSim = std::move(sim);
+                    const bool finalMerge =
+                        requestSlots.size() == request.fuelIndices.size();
+                    if (finalMerge) {
+#ifndef NDEBUG
+                        const int oldA = acceptedGrid.internalA();
+                        const int oldB = acceptedGrid.internalB();
+                        const int oldC = acceptedGrid.internalC();
+#endif
+                        acceptedGrid =
+                            compactEmptyInteriorPlanes(std::move(acceptedGrid));
+                        acceptedSim = simulateMixedFuel(acceptedGrid);
+                        const WallConnectionResult wall =
+                            evaluateHeatingClusterWallConnections(acceptedGrid,
+                                                                    acceptedSim);
+#ifndef NDEBUG
+                        {
+                            std::ostringstream detail;
+                            detail << "mode=merge old=" << oldA << "x" << oldB
+                                   << "x" << oldC
+                                   << " new=" << gridInteriorLabel(acceptedGrid)
+                                   << " heatingClusters=" << wall.heatingClusters
+                                   << " wallDisconnected="
+                                   << wall.disconnectedHeatingClusters
+                                   << " sourcesValid="
+                                   << (hasRequiredSources(acceptedGrid, request)
+                                           ? 1
+                                           : 0);
+                            NCFR_PERF_CHECKPOINT("wallConnection.final",
+                                                 detail.str().c_str());
+                        }
+#endif
+                        if (!isSearchAccepted(acceptedGrid, acceptedSim) ||
+                            heatingClusterCount(acceptedSim) != 1 ||
+                            !wall.allConnected() ||
+                            !hasRequiredSources(acceptedGrid, request)) {
+                            recordMergeSimulationRejection(acceptedGrid,
+                                                           acceptedSim, summary);
+                            continue;
+                        }
+                    }
                     recordMergeAccepted(phase, summary);
                     if (phase == MergePhase::Planar) {
-                        const MergeCandidateScore score = mergeCandidateScore(*merged.grid, sim);
+                        const MergeCandidateScore score =
+                            mergeCandidateScore(acceptedGrid, acceptedSim);
                         if (!bestPlanarScore.has_value() || isBetterMergeCandidate(score, *bestPlanarScore)) {
                             NCFR_PERF_COUNT(bestUpdates);
                             bestPlanarScore = score;
-                            EvaluatedMergeCandidate candidate{std::move(*merged.grid), std::move(sim)};
+                            EvaluatedMergeCandidate candidate{
+                                std::move(acceptedGrid), std::move(acceptedSim)};
                             bestPlanarMerge = std::move(candidate);
                         }
                     } else {
                         NCFR_PERF_COUNT(bestUpdates);
-                        EvaluatedMergeCandidate candidate{std::move(*merged.grid), std::move(sim)};
+                        EvaluatedMergeCandidate candidate{
+                            std::move(acceptedGrid), std::move(acceptedSim)};
                         return candidate;
                     }
                     continue;
@@ -812,7 +857,7 @@ std::optional<Grid> tryMergeLayoutsInOrder(const BuildRequest& request, const st
     }
 
     FuelSimulation sim = simulateMixedFuel(merged.grid);
-    if (!isAccepted(merged.grid, sim) || heatingClusterCount(sim) != 1) {
+    if (!isSearchAccepted(merged.grid, sim) || heatingClusterCount(sim) != 1) {
         return std::nullopt;
     }
     return std::move(merged.grid);

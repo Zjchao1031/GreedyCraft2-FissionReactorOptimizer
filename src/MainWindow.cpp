@@ -223,15 +223,11 @@ QString simulationFailureReason(const ncfr::Grid& grid, const ncfr::FuelSimulati
                        .arg(sim.fuelCells);
     }
 
-    int disconnectedHeatingClusters = 0;
-    for (const ncfr::ClusterStats& cluster : sim.clusters) {
-        if (cluster.rawHeating > 0 && !cluster.connectedToWall) {
-            ++disconnectedHeatingClusters;
-        }
-    }
-    if (disconnectedHeatingClusters > 0) {
+    const ncfr::WallConnectionResult wall =
+        ncfr::evaluateHeatingClusterWallConnections(grid, sim);
+    if (wall.disconnectedHeatingClusters > 0) {
         reasons << QString::fromUtf8("存在未连接到外壳的发热集群（%1 个）。")
-                       .arg(disconnectedHeatingClusters);
+                       .arg(wall.disconnectedHeatingClusters);
     }
 
     if (sim.minClusterMargin < 0) {
@@ -242,6 +238,10 @@ QString simulationFailureReason(const ncfr::Grid& grid, const ncfr::FuelSimulati
     if (sim.disconnectedFunctionalBlocks > 0) {
         reasons << QString::fromUtf8("存在未接入发热集群的有效功能块（%1 个）。")
                        .arg(sim.disconnectedFunctionalBlocks);
+    }
+
+    if (ncfr::hasInvalidSinks(grid, sim)) {
+        reasons << QString::fromUtf8("存在不满足放置规则的散热器。");
     }
 
     if (sim.fluxByIndex.size() < static_cast<size_t>(grid.volume()) ||
@@ -688,9 +688,11 @@ QJsonObject requestToJson(const ncfr::BuildRequest& request) {
         {QStringLiteral("selectedModerators"), selectedModeratorsToJson(request)},
         {QStringLiteral("selectedReflectors"), selectedReflectorsToJson(request)},
     };
-    const QJsonObject recipe = irradiatorRecipeToJson(request.irradiatorRecipeIndex);
-    if (!recipe.isEmpty()) {
-        object.insert(QStringLiteral("selectedIrradiatorRecipe"), recipe);
+    if (request.fuelIndices.size() == 5) {
+        const QJsonObject recipe = irradiatorRecipeToJson(request.irradiatorRecipeIndex);
+        if (!recipe.isEmpty()) {
+            object.insert(QStringLiteral("selectedIrradiatorRecipe"), recipe);
+        }
     }
     return object;
 }
@@ -1233,7 +1235,7 @@ void MainWindow::generateLayout(const FuelInputControls& controls) {
                 this,
                 QString::fromUtf8("燃料不适用于普通单燃料结构"),
                 QString::fromUtf8(
-                    "此种燃料基础发热值过大，采用单种燃料的输入方式难以生成满足要求的结构，建议采用低发热+高发热的输入组合以降低平均发热。"));
+                    "此种燃料基础发热超过 3715 H/t，采用单种燃料的输入方式难以生成满足要求的结构，建议采用低发热+高发热的输入组合以降低平均发热。"));
             return;
         }
     }
@@ -1485,15 +1487,17 @@ void MainWindow::replaceSelectedFuel(QListWidgetItem* item) {
         return;
     }
 
+    ncfr::BuildRequest trialRequest = currentResult_->request;
+    trialRequest.fuelIndices = fuelIndices;
     const ncfr::FuelSimulation sim = ncfr::simulateMixedFuel(trial);
-    if (!ncfr::isSafeOperatingSimulation(trial, sim)) {
+    if (!ncfr::isFinalReactorValid(trial, trialRequest, sim)) {
         QMessageBox::warning(this, QString::fromUtf8("警告"),
                              replacementFailureMessage(simulationFailureReason(trial, sim)));
         return;
     }
 
     currentResult_->grid = std::move(trial);
-    currentResult_->request.fuelIndices = std::move(fuelIndices);
+    currentResult_->request = std::move(trialRequest);
     currentResult_->minCoolingMargin = sim.minClusterMargin;
     currentResult_->usefulBlocks = countUsefulBlocks(currentResult_->grid);
     currentResult_->disconnectedFunctionalBlocks = sim.disconnectedFunctionalBlocks;

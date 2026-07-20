@@ -46,6 +46,40 @@ std::string gridInteriorLabel(const Grid& grid) {
     return os.str();
 }
 
+std::string occupiedPlaneRangeLabel(const Grid& grid, int axis) {
+    const int size = axis == 0 ? grid.internalA()
+                              : (axis == 1 ? grid.internalB() : grid.internalC());
+    std::vector<bool> occupied(static_cast<size_t>(size + 1), false);
+    for (const Pos& pos : grid.interiorPositions()) {
+        if (grid.at(pos.x, pos.y, pos.z).kind == BlockKind::Empty) {
+            continue;
+        }
+        const int coordinate = axis == 0 ? pos.x : (axis == 1 ? pos.y : pos.z);
+        occupied.at(static_cast<size_t>(coordinate)) = true;
+    }
+
+    int first = -1;
+    int last = -1;
+    int count = 0;
+    for (int coordinate = 1; coordinate <= size; ++coordinate) {
+        if (!occupied.at(static_cast<size_t>(coordinate))) {
+            continue;
+        }
+        if (first < 0) {
+            first = coordinate;
+        }
+        last = coordinate;
+        ++count;
+    }
+
+    if (first < 0) {
+        return "none";
+    }
+    std::ostringstream os;
+    os << first << ".." << last << "/" << count;
+    return os.str();
+}
+
 const char* directionLabel(int direction) {
     switch (direction) {
     case 0: return "+x";
@@ -583,6 +617,78 @@ bool allSourcesTargetFuel(const Grid& grid) {
     return true;
 }
 
+int sourceCountInGrid(const Grid& grid) {
+    int count = 0;
+    for (int z = 0; z < grid.depth(); ++z) {
+        for (int y = 0; y < grid.height(); ++y) {
+            for (int x = 0; x < grid.width(); ++x) {
+                if (grid.at(x, y, z).kind == BlockKind::Source) {
+                    ++count;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+bool hasRequiredSources(const Grid& grid, const BuildRequest& request) {
+    return allSourcesTargetFuel(grid) &&
+           sourceCountInGrid(grid) == requiredSourceCountForFuels(request);
+}
+
+bool hasRequiredFuelCells(const Grid& grid, const BuildRequest& request) {
+    std::vector<int> actualFuelIndices;
+    for (const Pos& pos : grid.interiorPositions()) {
+        const Block& block = grid.at(pos.x, pos.y, pos.z);
+        if (block.kind == BlockKind::FuelCell) {
+            actualFuelIndices.push_back(block.type);
+        }
+    }
+    std::vector<int> expectedFuelIndices = request.fuelIndices;
+    std::sort(actualFuelIndices.begin(), actualFuelIndices.end());
+    std::sort(expectedFuelIndices.begin(), expectedFuelIndices.end());
+    return actualFuelIndices == expectedFuelIndices;
+}
+
+bool hasRequiredIrradiator(const Grid& grid, const BuildRequest& request,
+                           const FuelSimulation& sim) {
+    int irradiatorBlocks = 0;
+    int matchingRecipeBlocks = 0;
+    for (const Pos& pos : grid.interiorPositions()) {
+        const Block& block = grid.at(pos.x, pos.y, pos.z);
+        if (block.kind != BlockKind::Irradiator) {
+            continue;
+        }
+        ++irradiatorBlocks;
+        if (block.type == request.irradiatorRecipeIndex) {
+            ++matchingRecipeBlocks;
+        }
+    }
+
+    const int functionalIrradiators = countFunctionalIrradiators(sim);
+    if (request.fuelIndices.size() == 5) {
+        return irradiatorBlocks == 1 && matchingRecipeBlocks == 1 &&
+               functionalIrradiators == 1;
+    }
+    return irradiatorBlocks == 0 && functionalIrradiators == 0;
+}
+
+bool hasRequiredBoundaryParts(const Grid& grid, const BuildRequest& request);
+
+bool isFinalReactorValidInternal(const Grid& grid, const BuildRequest& request,
+                                 const FuelSimulation& sim) {
+    const bool sizeValid =
+        grid.internalA() >= 1 && grid.internalA() <= kMaxSize &&
+        grid.internalB() >= 1 && grid.internalB() <= kMaxSize &&
+        grid.internalC() >= 1 && grid.internalC() <= kMaxSize;
+    return sizeValid && hasNoEmptyInteriorPlane(grid) &&
+           hasRequiredFuelCells(grid, request) &&
+           hasRequiredIrradiator(grid, request, sim) &&
+           hasRequiredSources(grid, request) &&
+           hasRequiredBoundaryParts(grid, request) &&
+           isSafeOperatingSimulation(grid, sim);
+}
+
 bool hasNoEmptyInteriorPlane(const Grid& grid) {
     NCFR_PERF_COUNT(hasNoEmptyInteriorPlaneCalls);
     NCFR_PERF_SCOPE(hasNoEmptyInteriorPlaneNs);
@@ -813,17 +919,6 @@ bool removeInvalidSinks(Grid& grid, const FuelSimulation& sim) {
     return removed;
 }
 
-bool hasInvalidSinks(const Grid& grid, const FuelSimulation& sim) {
-    for (const Pos& pos : grid.interiorPositions()) {
-        const int idx = grid.index(pos.x, pos.y, pos.z);
-        const Block& block = grid.atIndex(idx);
-        if (block.kind == BlockKind::Sink && !sim.validSinks.at(static_cast<size_t>(idx))) {
-            return true;
-        }
-    }
-    return false;
-}
-
 int countUsefulBlocks(const Grid& grid) {
     int count = 0;
     for (const Pos& pos : grid.interiorPositions()) {
@@ -921,6 +1016,71 @@ void addIrradiatorPort(Grid& grid) {
         ++portCount;
     }
     throw std::runtime_error("外壳空间不足，无法放置输入/输出辐照器端口。");
+}
+
+bool hasRequiredBoundaryParts(const Grid& grid, const BuildRequest& request) {
+    int controllers = 0;
+    int inputVents = 0;
+    int outputVents = 0;
+    bool hasIrradiator = false;
+    std::vector<bool> fuelInputs(fuels().size(), false);
+    std::vector<bool> fuelOutputs(fuels().size(), false);
+    bool irradiatorInput = false;
+    bool irradiatorOutput = false;
+
+    for (int z = 0; z < grid.depth(); ++z) {
+        for (int y = 0; y < grid.height(); ++y) {
+            for (int x = 0; x < grid.width(); ++x) {
+                const Block& block = grid.at(x, y, z);
+                if (grid.isInterior(x, y, z)) {
+                    hasIrradiator = hasIrradiator || block.kind == BlockKind::Irradiator;
+                    continue;
+                }
+                switch (block.kind) {
+                case BlockKind::Controller:
+                    ++controllers;
+                    break;
+                case BlockKind::VentIn:
+                    ++inputVents;
+                    break;
+                case BlockKind::VentOut:
+                    ++outputVents;
+                    break;
+                case BlockKind::CellPort: {
+                    const int fuelIndex = fuelCellPortFuelIndex(block.type);
+                    if (fuelIndex >= 0 && fuelIndex < static_cast<int>(fuels().size())) {
+                        if (fuelCellPortRole(block.type) == FuelCellPortRole::Input) {
+                            fuelInputs.at(static_cast<size_t>(fuelIndex)) = true;
+                        } else {
+                            fuelOutputs.at(static_cast<size_t>(fuelIndex)) = true;
+                        }
+                    }
+                    break;
+                }
+                case BlockKind::IrradiatorPort:
+                    if (irradiatorPortRole(block.type) == FuelCellPortRole::Input) {
+                        irradiatorInput = true;
+                    } else {
+                        irradiatorOutput = true;
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    }
+
+    if (controllers != 1 || inputVents != 1 || outputVents != 1) {
+        return false;
+    }
+    for (int fuelIndex : uniqueFuelIndicesInRequest(request)) {
+        if (!fuelInputs.at(static_cast<size_t>(fuelIndex)) ||
+            !fuelOutputs.at(static_cast<size_t>(fuelIndex))) {
+            return false;
+        }
+    }
+    return !hasIrradiator || (irradiatorInput && irradiatorOutput);
 }
 
 double totalIrradiatorFlux(const FuelSimulation& sim) {
@@ -1069,8 +1229,39 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
 }
 
 OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, const FuelSimulation& sim) {
+#ifdef NDEBUG
     (void)sim;
+#else
+    const int oldA = grid.internalA();
+    const int oldB = grid.internalB();
+    const int oldC = grid.internalC();
+    const std::string keepX = occupiedPlaneRangeLabel(grid, 0);
+    const std::string keepY = occupiedPlaneRangeLabel(grid, 1);
+    const std::string keepZ = occupiedPlaneRangeLabel(grid, 2);
+    {
+        std::ostringstream detail;
+        detail << "mode=finalizeInput grid=" << oldA << "x" << oldB << "x" << oldC
+               << " compatible=" << (sim.compatible ? 1 : 0)
+               << " rawHeating=" << sim.rawHeating
+               << " cooling=" << sim.cooling
+               << " minMargin=" << sim.minClusterMargin
+               << " disconnected=" << sim.disconnectedFunctionalBlocks;
+        NCFR_PERF_CHECKPOINT("simulation.search", detail.str().c_str());
+    }
+#endif
     Grid finalGrid = compactEmptyInteriorPlanes(std::move(grid));
+#ifndef NDEBUG
+    {
+        std::ostringstream detail;
+        detail << "old=" << oldA << "x" << oldB << "x" << oldC
+               << " new=" << gridInteriorLabel(finalGrid)
+               << " keepX=" << keepX
+               << " keepY=" << keepY
+               << " keepZ=" << keepZ
+               << " mode=final";
+        NCFR_PERF_CHECKPOINT("compaction.plan", detail.str().c_str());
+    }
+#endif
     FuelSimulation finalSim = simulateMixedFuel(finalGrid);
 
     for (int pass = 0; pass < 24 && hasInvalidSinks(finalGrid, finalSim); ++pass) {
@@ -1078,15 +1269,65 @@ OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, 
         finalGrid = compactEmptyInteriorPlanes(std::move(finalGrid));
         finalSim = simulateMixedFuel(finalGrid);
     }
-    if (hasInvalidSinks(finalGrid, finalSim)) {
-        throw std::runtime_error("最终方案仍包含无效散热器，无法导出。");
-    }
-    if (!isSafeOperatingSimulation(finalGrid, finalSim)) {
-        throw std::runtime_error("最终压缩并剔除无效散热器后方案不再满足安全运行判定。");
-    }
 
     addFuelCellPorts(finalGrid, request);
     addIrradiatorPort(finalGrid);
+    finalSim = simulateMixedFuel(finalGrid);
+    const bool finalValid =
+        ncfr::isFinalReactorValid(finalGrid, request, finalSim);
+#ifndef NDEBUG
+    const bool sizeValid =
+        finalGrid.internalA() >= 1 && finalGrid.internalA() <= kMaxSize &&
+        finalGrid.internalB() >= 1 && finalGrid.internalB() <= kMaxSize &&
+        finalGrid.internalC() >= 1 && finalGrid.internalC() <= kMaxSize;
+    const bool sourcesValid = hasRequiredSources(finalGrid, request);
+    const bool fuelCellsValid = hasRequiredFuelCells(finalGrid, request);
+    const bool irradiatorValid =
+        hasRequiredIrradiator(finalGrid, request, finalSim);
+    const bool boundaryPartsValid = hasRequiredBoundaryParts(finalGrid, request);
+    const bool noEmptyPlane = hasNoEmptyInteriorPlane(finalGrid);
+    const bool searchAccepted = isSearchOperatingSimulation(finalGrid, finalSim);
+    const bool sinksValid = !hasInvalidSinks(finalGrid, finalSim);
+    const WallConnectionResult wall =
+        evaluateHeatingClusterWallConnections(finalGrid, finalSim);
+    const bool wallConnected = wall.allConnected();
+    const bool safeOperating = searchAccepted && sinksValid && wallConnected;
+
+    {
+        std::ostringstream detail;
+        detail << "grid=" << gridInteriorLabel(finalGrid)
+               << " accepted=" << (finalValid ? 1 : 0)
+               << " compatible=" << (finalSim.compatible ? 1 : 0)
+               << " minMargin=" << finalSim.minClusterMargin
+               << " disconnected=" << finalSim.disconnectedFunctionalBlocks
+               << " heatingClusters=" << wall.heatingClusters
+               << " wallDisconnected=" << wall.disconnectedHeatingClusters
+               << " searchAccepted=" << (searchAccepted ? 1 : 0)
+               << " sinksValid=" << (sinksValid ? 1 : 0)
+               << " wallConnected=" << (wallConnected ? 1 : 0)
+               << " safeOperating=" << (safeOperating ? 1 : 0)
+               << " sourceCount=" << sourceCountInGrid(finalGrid)
+               << " requiredSources=" << requiredSourceCountForFuels(request)
+               << " sizeValid=" << (sizeValid ? 1 : 0)
+               << " noEmptyPlane=" << (noEmptyPlane ? 1 : 0)
+               << " fuelCellsValid=" << (fuelCellsValid ? 1 : 0)
+               << " irradiatorValid=" << (irradiatorValid ? 1 : 0)
+               << " sourcesValid=" << (sourcesValid ? 1 : 0)
+               << " boundaryPartsValid=" << (boundaryPartsValid ? 1 : 0);
+        NCFR_PERF_CHECKPOINT("validation.final", detail.str().c_str());
+        std::ostringstream wallDetail;
+        wallDetail << "grid=" << gridInteriorLabel(finalGrid)
+                   << " heatingClusters=" << wall.heatingClusters
+                   << " wallDisconnected=" << wall.disconnectedHeatingClusters
+                   << " accepted=" << (wall.allConnected() ? 1 : 0);
+        NCFR_PERF_CHECKPOINT("wallConnection.final", wallDetail.str().c_str());
+    }
+#endif
+
+    if (!finalValid) {
+        throw std::runtime_error("最终压缩、端口放置并校验后方案不再满足安全运行判定。");
+    }
+
     OptimizationResult result(std::move(finalGrid), request);
     result.minCoolingMargin = finalSim.minClusterMargin;
     result.usefulBlocks = countUsefulBlocks(result.grid);
@@ -1096,8 +1337,8 @@ OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, 
     return result;
 }
 
-bool isAccepted(const Grid& grid, const FuelSimulation& sim) {
-    return isSafeOperatingSimulation(grid, sim);
+bool isSearchAccepted(const Grid& grid, const FuelSimulation& sim) {
+    return isSearchOperatingSimulation(grid, sim);
 }
 
 bool isPreCompactRunnable(const FuelSimulation& sim) {

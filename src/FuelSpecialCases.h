@@ -2,61 +2,61 @@
 
 #include "Data.h"
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <string_view>
-
 namespace ncfr {
 
-inline bool fuelEnglishNameEquals(const Fuel& fuel, std::string_view name) {
-    return fuel.nameEn.size() == name.size() &&
-           std::equal(fuel.nameEn.begin(), fuel.nameEn.end(), name.begin());
+inline constexpr double kEndStoneFallbackFuelHeatThreshold = 2190.0;
+inline constexpr double kEndStoneFallbackFuelHeatLimit = 2515.0;
+inline constexpr double kCarobbiiteFallbackFuelHeatLimit = 3075.0;
+inline constexpr double kManaDustFallbackFuelHeatLimit = 3715.0;
+inline constexpr double kNormalSingleFuelHeatLimit = kManaDustFallbackFuelHeatLimit;
+inline constexpr long long kEndStoneFallbackCoolingCapacity = 325;
+inline constexpr long long kCarobbiiteFallbackCoolingCapacity = 560;
+inline constexpr long long kEndStoneCarobbiiteFallbackCoolingCapacity =
+    kEndStoneFallbackCoolingCapacity + kCarobbiiteFallbackCoolingCapacity;
+inline constexpr long long kManaDustFallbackCoolingCapacity = 640;
+inline constexpr long long kCombinedHighHeatFallbackCoolingCapacity =
+    kEndStoneCarobbiiteFallbackCoolingCapacity +
+    kManaDustFallbackCoolingCapacity;
+
+inline bool usesEndStoneOnlyReflectorCooling(const Fuel& fuel) {
+    return fuel.heat > kEndStoneFallbackFuelHeatThreshold &&
+           fuel.heat <= kEndStoneFallbackFuelHeatLimit;
 }
 
-template <std::size_t N>
-inline bool fuelEnglishNameIn(const Fuel& fuel, const std::array<std::string_view, N>& names) {
-    return std::any_of(names.begin(), names.end(), [&](std::string_view name) {
-        return fuelEnglishNameEquals(fuel, name);
-    });
+inline bool usesCarobbiiteReflectorCooling(const Fuel& fuel) {
+    return fuel.heat > kEndStoneFallbackFuelHeatLimit &&
+           fuel.heat <= kCarobbiiteFallbackFuelHeatLimit;
+}
+
+inline bool usesEndStoneReflectorCooling(const Fuel& fuel) {
+    return usesEndStoneOnlyReflectorCooling(fuel) ||
+           usesCarobbiiteReflectorCooling(fuel);
+}
+
+inline bool hasEndStoneFallbackCoolingDeficit(long long deficit) {
+    return deficit > 0 && deficit <= kEndStoneFallbackCoolingCapacity;
+}
+
+inline bool hasEndStoneCarobbiiteFallbackCoolingDeficit(long long deficit) {
+    return deficit > 0 && deficit <= kEndStoneCarobbiiteFallbackCoolingCapacity;
+}
+
+inline bool hasManaDustFallbackCoolingDeficit(long long deficit) {
+    return deficit > 0 && deficit <= kManaDustFallbackCoolingCapacity;
+}
+
+inline bool hasCombinedHighHeatFallbackCoolingDeficit(long long deficit) {
+    return deficit > 0 &&
+           deficit <= kCombinedHighHeatFallbackCoolingCapacity;
 }
 
 inline bool usesSpecialManaDustCornerSinks(const Fuel& fuel) {
-    static constexpr std::array<std::string_view, 10> kFuelNames{
-        "HEE-254 Zirconium Alloy Fuel Pellet",
-        "IPCf-249 TRISO Fuel Pebble",
-        "IPCf-249 Oxide Fuel Pellet",
-        "HECf-253 TRISO Fuel Pebble",
-        "HECf-253 Oxide Fuel Pellet",
-        "UECf-249 Zirconium Alloy Fuel Pellet",
-        "WGE-254 Nitride Fuel Pellet",
-        "MTRISO-294 Fuel Pebble",
-        "MOX-294 Fuel Pellet",
-        "XEE-254 Zirconium Alloy Fuel Pellet",
-    };
-    return fuelEnglishNameIn(fuel, kFuelNames);
+    return fuel.heat > kCarobbiiteFallbackFuelHeatLimit &&
+           fuel.heat <= kManaDustFallbackFuelHeatLimit;
 }
 
 inline bool blocksNormalSingleFuelGeneration(const Fuel& fuel) {
-    static constexpr std::array<std::string_view, 16> kFuelNames{
-        "IPE-254 Zirconium Alloy Fuel Pellet",
-        "WGE-254 Zirconium Alloy Fuel Pellet",
-        "IPE-254 TRISO Fuel Pebble",
-        "IPE-254 Oxide Fuel Pellet",
-        "UEE-254 Zirconium Alloy Fuel Pellet",
-        "IPCf-249 Zirconium Alloy Fuel Pellet",
-        "HECf-253 Zirconium Alloy Fuel Pellet",
-        "WGE-254 TRISO Fuel Pebble",
-        "WGE-254 Oxide Fuel Pellet",
-        "MZA-294 Fuel Pellet",
-        "WGCf-249 Zirconium Alloy Fuel Pellet",
-        "SEE-254 Zirconium Alloy Fuel Pellet",
-        "MZA-258 Fuel Pellet",
-        "IPE-254 Nitride Fuel Pellet",
-        "UEE-254 TRISO Fuel Pebble",
-        "UEE-254 Oxide Fuel Pellet",
-    };
-    return fuelEnglishNameIn(fuel, kFuelNames);
+    return fuel.heat > kNormalSingleFuelHeatLimit;
 }
 
 } // namespace ncfr

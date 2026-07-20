@@ -50,16 +50,6 @@ int minLineCount(double requiredFlux, double fluxPerLine) {
     return static_cast<int>(std::ceil((requiredFlux - kFluxEpsilon) / fluxPerLine));
 }
 
-int minSearchInteriorSize(double heat) {
-    if (heat > 900.0) {
-        return 18;
-    }
-    if (heat > 100.0) {
-        return 15;
-    }
-    return 5;
-}
-
 std::vector<int> fuelCellIndices(const Grid& grid) {
     std::vector<int> indices;
     for (const Pos& pos : grid.interiorPositions()) {
@@ -215,8 +205,7 @@ const std::vector<FuelActivationProfile>& fuelActivationProfiles() {
                               fuel.selfPriming,
                               minLineCount(fuel.criticality, fullReflectorFlux),
                               minLineCount(fuel.criticality, halfReflectorFlux),
-                              minLineCount(fuel.criticality, heavyWaterFlux),
-                              minSearchInteriorSize(fuel.heat)});
+                              minLineCount(fuel.criticality, heavyWaterFlux)});
         }
         return result;
     }();

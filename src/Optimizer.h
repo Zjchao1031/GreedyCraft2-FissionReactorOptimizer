@@ -10,6 +10,8 @@
 
 namespace ncfr {
 
+struct FuelSimulation;
+
 struct BuildRequest {
     std::vector<int> fuelIndices;
     std::vector<int> selectedModeratorTypeIndices;
@@ -36,6 +38,8 @@ struct OptimizationResult {
 };
 
 int requiredSourceCount(const BuildRequest& request);
+bool isFinalReactorValid(const Grid& grid, const BuildRequest& request,
+                         const FuelSimulation& sim);
 OptimizationResult optimizeLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested = nullptr);
 
 } // namespace ncfr

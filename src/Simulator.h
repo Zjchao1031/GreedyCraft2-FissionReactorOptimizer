@@ -11,8 +11,11 @@ namespace ncfr {
 struct ClusterStats {
     long long rawHeating = 0;
     long long cooling = 0;
-    bool connectedToWall = false;
     int components = 0;
+};
+
+struct SimulationOptions {
+    const StateVector* forcedValidSinks = nullptr;
 };
 
 struct FuelSimulation {
@@ -36,10 +39,20 @@ struct FuelSimulation {
     std::vector<ClusterStats> clusters;
 };
 
+struct WallConnectionResult {
+    int heatingClusters = 0;
+    int disconnectedHeatingClusters = 0;
+
+    bool allConnected() const { return heatingClusters > 0 && disconnectedHeatingClusters == 0; }
+};
+
 int sourcePrimingTargetIndex(const Grid& grid, const Pos& sourcePos);
-FuelSimulation simulateFuel(const Grid& grid, const Fuel& fuel);
-FuelSimulation simulateMixedFuel(const Grid& grid);
+FuelSimulation simulateFuel(const Grid& grid, const Fuel& fuel, const SimulationOptions& options = {});
+FuelSimulation simulateMixedFuel(const Grid& grid, const SimulationOptions& options = {});
+WallConnectionResult evaluateHeatingClusterWallConnections(const Grid& grid, const FuelSimulation& sim);
 bool hasSafeFuelFlux(const Grid& grid, const FuelSimulation& sim);
+bool hasInvalidSinks(const Grid& grid, const FuelSimulation& sim);
+bool isSearchOperatingSimulation(const Grid& grid, const FuelSimulation& sim);
 bool isSafeOperatingSimulation(const Grid& grid, const FuelSimulation& sim);
 
 } // namespace ncfr

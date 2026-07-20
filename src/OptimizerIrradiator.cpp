@@ -16,8 +16,8 @@
 namespace ncfr::optimizer_detail {
 namespace {
 
-constexpr int kIrradiatorInteriorSize = 17;
-constexpr int kIrradiatorCenter = 9;
+constexpr int kIrradiatorInteriorSize = kMaxSize;
+constexpr int kIrradiatorCenter = 12;
 constexpr int kIrradiatorFuelInputCount = 5;
 constexpr int kIrradiatorFuelDistance = kMaxIrradiatorLineModerators + 1;
 constexpr int kAnySource = -1;
@@ -665,7 +665,7 @@ void requireSixFuelIrradiatorState(const Grid& grid, const FuelSimulation& sim, 
 }
 
 bool isAcceptedSixFuelIrradiator(const Grid& grid, const FuelSimulation& sim) {
-    return isSafeOperatingSimulation(grid, sim) && countFunctionalIrradiators(sim) == 1;
+    return isSearchOperatingSimulation(grid, sim) && countFunctionalIrradiators(sim) == 1;
 }
 
 void clearMutableSupport(Grid& grid, const FixedIrradiatorSkeleton& skeleton) {
@@ -768,6 +768,18 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
         throw std::runtime_error(os.str());
     }
 
+#ifndef NDEBUG
+    {
+        std::ostringstream os;
+        os << "mode=irradiator grid=" << gridInteriorLabel(grid)
+           << " compatible=" << (sim.compatible ? 1 : 0)
+           << " rawHeating=" << sim.rawHeating
+           << " cooling=" << sim.cooling
+           << " minMargin=" << sim.minClusterMargin
+           << " disconnected=" << sim.disconnectedFunctionalBlocks;
+        NCFR_PERF_CHECKPOINT("simulation.search", os.str().c_str());
+    }
+#endif
     return resultFromSimulation(std::move(grid), request, sim);
 }
 

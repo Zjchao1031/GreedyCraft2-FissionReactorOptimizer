@@ -5,6 +5,7 @@
 
 #include <exception>
 #include <new>
+#include <sstream>
 #include <stdexcept>
 
 namespace ncfr {
@@ -98,6 +99,11 @@ int requiredSourceCount(const BuildRequest& request) {
     return requiredSourceCountForFuels(request);
 }
 
+bool isFinalReactorValid(const Grid& grid, const BuildRequest& request,
+                         const FuelSimulation& sim) {
+    return isFinalReactorValidInternal(grid, request, sim);
+}
+
 OptimizationResult optimizeLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested) {
 #ifndef NDEBUG
     perf::resetCounters();
@@ -106,6 +112,25 @@ OptimizationResult optimizeLayout(const BuildRequest& request, const std::atomic
     try {
         validateRequest(request);
         throwIfCancelled(cancelRequested);
+#ifndef NDEBUG
+        {
+            const char* mode = "unsupported";
+            if (request.fuelIndices.size() == 1) {
+                mode = "single";
+            } else if (request.fuelIndices.size() == 2) {
+                mode = "dual";
+            } else if (request.fuelIndices.size() == 4) {
+                mode = "quad";
+            } else if (request.fuelIndices.size() == 5) {
+                mode = "irradiator";
+            }
+            std::ostringstream os;
+            os << "mode=" << mode
+               << " fuelCells=" << request.fuelIndices.size()
+               << " initialInterior=" << kMaxSize << "x" << kMaxSize << "x" << kMaxSize;
+            NCFR_PERF_CHECKPOINT("generation.frame", os.str().c_str());
+        }
+#endif
         OptimizationResult finalResult = selectStrategy(request).optimize(request, cancelRequested);
 #ifndef NDEBUG
         perf::counters().totalNs = perf::elapsedNs(totalStart);

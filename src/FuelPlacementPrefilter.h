@@ -17,7 +17,6 @@ struct FuelActivationProfile {
     int minFullReflectorDirs = 0;
     int minHalfReflectorDirs = 0;
     int minHeavyWaterFuelLinks = 0;
-    int minSearchInteriorSize = 5;
 };
 
 enum class FuelRelationRejectReason {

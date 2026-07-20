@@ -84,11 +84,22 @@ void seedFromSources(const Grid& grid, StateVector& seeded) {
     }
 }
 
-void markCompletedLine(const std::vector<int>& moderators, const std::vector<ShieldLineUse>& shields,
-                       double shieldFlux, StateVector& usedModerators, std::vector<double>& shieldFluxByIndex) {
-    for (int idx : moderators) {
-        usedModerators.at(static_cast<size_t>(idx)) = true;
+void markActiveModeratorEndpoints(const std::vector<int>& moderators, bool endpointSupportsActiveModerator,
+                                  StateVector& usedModerators) {
+    if (moderators.empty()) {
+        return;
     }
+
+    usedModerators.at(static_cast<size_t>(moderators.front())) = true;
+    if (endpointSupportsActiveModerator) {
+        usedModerators.at(static_cast<size_t>(moderators.back())) = true;
+    }
+}
+
+void markCompletedLine(const std::vector<int>& moderators, const std::vector<ShieldLineUse>& shields,
+                       bool endpointSupportsActiveModerator, double shieldFlux, StateVector& usedModerators,
+                       std::vector<double>& shieldFluxByIndex) {
+    markActiveModeratorEndpoints(moderators, endpointSupportsActiveModerator, usedModerators);
     for (const ShieldLineUse& shield : shields) {
         shieldFluxByIndex.at(static_cast<size_t>(shield.index)) += std::max(0.0, shieldFlux);
     }
@@ -96,9 +107,7 @@ void markCompletedLine(const std::vector<int>& moderators, const std::vector<Shi
 
 void markCompletedFluxSinkLine(const std::vector<int>& moderators, const std::vector<ShieldLineUse>& shields,
                                StateVector& usedModerators, std::vector<double>& shieldFluxByIndex) {
-    for (int idx : moderators) {
-        usedModerators.at(static_cast<size_t>(idx)) = true;
-    }
+    markActiveModeratorEndpoints(moderators, false, usedModerators);
     for (const ShieldLineUse& shield : shields) {
         shieldFluxByIndex.at(static_cast<size_t>(shield.index)) += std::max(0.0, shield.innerFlux);
     }
@@ -164,7 +173,7 @@ void traceLine(const Grid& grid, const Fuel& fuel, const Pos& from, const int di
             flux.at(static_cast<size_t>(targetIndex)) += lineFlux;
             ++heatLinks.at(static_cast<size_t>(fromIndex));
             ++heatLinks.at(static_cast<size_t>(targetIndex));
-            markCompletedLine(lineModerators, lineShields, lineFlux, usedModerators, shieldFluxByIndex);
+            markCompletedLine(lineModerators, lineShields, true, lineFlux, usedModerators, shieldFluxByIndex);
             return;
         }
         if (targetBlock.kind == BlockKind::Irradiator && targetBlock.type >= 0) {
@@ -180,7 +189,7 @@ void traceLine(const Grid& grid, const Fuel& fuel, const Pos& from, const int di
             const double reflectedFlux = std::floor(2.0 * lineFlux * reflector.reflectivity);
             flux.at(static_cast<size_t>(fromIndex)) += reflectedFlux;
             ++heatLinks.at(static_cast<size_t>(fromIndex));
-            markCompletedLine(lineModerators, lineShields, reflectedFlux, usedModerators, shieldFluxByIndex);
+            markCompletedLine(lineModerators, lineShields, false, reflectedFlux, usedModerators, shieldFluxByIndex);
             return;
         }
         cur = target;
@@ -281,7 +290,7 @@ int sourcePrimingTargetIndex(const Grid& grid, const Pos& sourcePos) {
 }
 
 template <typename FuelForIndex>
-FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex) {
+FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex, const SimulationOptions& options) {
     NCFR_PERF_COUNT(simulateFuelCalls);
     NCFR_PERF_ADD(simulateFuelVolumeTotal, grid.volume());
     NCFR_PERF_SCOPE(simulateFuelNs);
@@ -383,6 +392,15 @@ FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex) {
     context.functionalShields = &result.functionalShields;
     context.functionalIrradiators = &result.functionalIrradiators;
     result.validSinks = evaluateValidSinks(grid, context);
+    if (options.forcedValidSinks != nullptr &&
+        options.forcedValidSinks->size() == result.validSinks.size()) {
+        for (int idx = 0; idx < grid.volume(); ++idx) {
+            if (options.forcedValidSinks->at(static_cast<size_t>(idx)) &&
+                grid.atIndex(idx).kind == BlockKind::Sink) {
+                result.validSinks.at(static_cast<size_t>(idx)) = true;
+            }
+        }
+    }
 
     for (int idx = 0; idx < grid.volume(); ++idx) {
         const Block& block = grid.atIndex(idx);
@@ -428,9 +446,6 @@ FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex) {
             }
 
             grid.forEachNeighbor6(p, [&](const Pos& n) {
-                if (grid.isBoundary(n.x, n.y, n.z) && isCasingLike(grid.at(n.x, n.y, n.z).kind)) {
-                    cluster.connectedToWall = true;
-                }
                 const int nIdx = grid.index(n.x, n.y, n.z);
                 if (!visited.at(static_cast<size_t>(nIdx)) &&
                     isConductor(grid, nIdx, running, result.validSinks, result.functionalShields,
@@ -463,7 +478,7 @@ FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex) {
     result.compatible = result.runningCells == result.fuelCells && result.fuelCells > 0;
     if (result.compatible) {
         for (const ClusterStats& cluster : result.clusters) {
-            if (cluster.rawHeating > 0 && (!cluster.connectedToWall || cluster.cooling < cluster.rawHeating)) {
+            if (cluster.rawHeating > 0 && cluster.cooling < cluster.rawHeating) {
                 result.compatible = false;
                 break;
             }
@@ -472,15 +487,58 @@ FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex) {
     return result;
 }
 
-FuelSimulation simulateFuel(const Grid& grid, const Fuel& fuel) {
-    return simulateFuelImpl(grid, [&](int) -> const Fuel& { return fuel; });
+FuelSimulation simulateFuel(const Grid& grid, const Fuel& fuel, const SimulationOptions& options) {
+    return simulateFuelImpl(grid, [&](int) -> const Fuel& { return fuel; }, options);
 }
 
-FuelSimulation simulateMixedFuel(const Grid& grid) {
+FuelSimulation simulateMixedFuel(const Grid& grid, const SimulationOptions& options) {
     return simulateFuelImpl(grid, [&](int idx) -> const Fuel& {
         const Block& block = grid.atIndex(idx);
         return fuels().at(static_cast<size_t>(block.type));
-    });
+    }, options);
+}
+
+WallConnectionResult evaluateHeatingClusterWallConnections(const Grid& grid, const FuelSimulation& sim) {
+    WallConnectionResult result;
+    if (sim.heatingClusterBlocks.size() != static_cast<size_t>(grid.volume())) {
+        return result;
+    }
+
+    StateVector visited(static_cast<size_t>(grid.volume()), false);
+    for (int start = 0; start < grid.volume(); ++start) {
+        if (visited.at(static_cast<size_t>(start)) ||
+            !sim.heatingClusterBlocks.at(static_cast<size_t>(start))) {
+            continue;
+        }
+
+        ++result.heatingClusters;
+        bool connectedToWall = false;
+        std::queue<int> queue;
+        queue.push(start);
+        visited.at(static_cast<size_t>(start)) = true;
+        while (!queue.empty()) {
+            const int idx = queue.front();
+            queue.pop();
+            const Pos pos = indexToPos(grid, idx);
+            grid.forEachNeighbor6(pos, [&](const Pos& neighbor) {
+                if (grid.isBoundary(neighbor.x, neighbor.y, neighbor.z) &&
+                    isCasingLike(grid.at(neighbor.x, neighbor.y, neighbor.z).kind)) {
+                    connectedToWall = true;
+                    return;
+                }
+                const int neighborIdx = grid.index(neighbor.x, neighbor.y, neighbor.z);
+                if (!visited.at(static_cast<size_t>(neighborIdx)) &&
+                    sim.heatingClusterBlocks.at(static_cast<size_t>(neighborIdx))) {
+                    visited.at(static_cast<size_t>(neighborIdx)) = true;
+                    queue.push(neighborIdx);
+                }
+            });
+        }
+        if (!connectedToWall) {
+            ++result.disconnectedHeatingClusters;
+        }
+    }
+    return result;
 }
 
 bool hasSafeFuelFlux(const Grid& grid, const FuelSimulation& sim) {
@@ -507,9 +565,28 @@ bool hasSafeFuelFlux(const Grid& grid, const FuelSimulation& sim) {
     return true;
 }
 
-bool isSafeOperatingSimulation(const Grid& grid, const FuelSimulation& sim) {
+bool hasInvalidSinks(const Grid& grid, const FuelSimulation& sim) {
+    if (sim.validSinks.size() != static_cast<size_t>(grid.volume())) {
+        return true;
+    }
+    for (const Pos& pos : grid.interiorPositions()) {
+        const int idx = grid.index(pos.x, pos.y, pos.z);
+        if (grid.atIndex(idx).kind == BlockKind::Sink &&
+            !sim.validSinks.at(static_cast<size_t>(idx))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool isSearchOperatingSimulation(const Grid& grid, const FuelSimulation& sim) {
     return sim.compatible && sim.minClusterMargin >= 0 && sim.disconnectedFunctionalBlocks == 0 &&
            hasSafeFuelFlux(grid, sim);
+}
+
+bool isSafeOperatingSimulation(const Grid& grid, const FuelSimulation& sim) {
+    return isSearchOperatingSimulation(grid, sim) && !hasInvalidSinks(grid, sim) &&
+           evaluateHeatingClusterWallConnections(grid, sim).allConnected();
 }
 
 } // namespace ncfr

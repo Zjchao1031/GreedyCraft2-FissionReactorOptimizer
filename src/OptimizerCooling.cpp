@@ -362,8 +362,15 @@ bool coolingExpansionGoalReached(const FuelSimulation& sim, bool allowDisconnect
            (allowDisconnectedFunctionalBlocks || sim.disconnectedFunctionalBlocks == 0);
 }
 
+bool coolingExpansionHandoffReached(const FuelSimulation& sim,
+                                    const CoolingExpansionOptions& options) {
+    const long long deficit = sim.rawHeating - sim.cooling;
+    return options.handoffCoolingDeficit >= 0 &&
+           deficit > 0 && deficit <= options.handoffCoolingDeficit;
+}
+
 bool coolingExpansionMakesProgress(const FuelSimulation& trialSim, const FuelSimulation& currentSim,
-                                   bool allowDisconnectedFunctionalBlocks) {
+                                    bool allowDisconnectedFunctionalBlocks) {
     if (!currentSim.compatible && trialSim.compatible) {
         return true;
     }
@@ -547,6 +554,12 @@ Grid expandCoolingWithPreserver(Grid grid, const std::function<bool(Grid&)>& pre
 #endif
         grid = std::move(bestGrid);
         currentSim = std::move(bestSim);
+        if (coolingExpansionHandoffReached(currentSim, options)) {
+#ifndef NDEBUG
+            logCoolingExpansionCheckpoint("handoff", grid, currentSim, pass);
+#endif
+            break;
+        }
         if (coolingExpansionGoalReached(currentSim, allowDisconnectedFunctionalBlocks)) {
 #ifndef NDEBUG
             logCoolingExpansionCheckpoint("success", grid, currentSim, pass);
