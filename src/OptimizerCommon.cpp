@@ -617,6 +617,56 @@ bool allSourcesTargetFuel(const Grid& grid) {
     return true;
 }
 
+std::vector<SourcePrimingTarget> sourcePrimingTargets(const Grid& grid) {
+    std::vector<SourcePrimingTarget> targets;
+    for (int z = 0; z < grid.depth(); ++z) {
+        for (int y = 0; y < grid.height(); ++y) {
+            for (int x = 0; x < grid.width(); ++x) {
+                if (grid.at(x, y, z).kind != BlockKind::Source) {
+                    continue;
+                }
+                const Pos source{x, y, z};
+                targets.push_back({
+                    source,
+                    sourcePrimingTargetIndex(grid, source),
+                });
+            }
+        }
+    }
+    return targets;
+}
+
+bool matchesSourcePrimingTargets(
+    const Grid& grid,
+    const std::vector<SourcePrimingTarget>& expectedTargets) {
+    size_t sourceCount = 0;
+    for (int z = 0; z < grid.depth(); ++z) {
+        for (int y = 0; y < grid.height(); ++y) {
+            for (int x = 0; x < grid.width(); ++x) {
+                if (grid.at(x, y, z).kind == BlockKind::Source) {
+                    ++sourceCount;
+                }
+            }
+        }
+    }
+    if (sourceCount != expectedTargets.size()) {
+        return false;
+    }
+
+    for (const SourcePrimingTarget& expected : expectedTargets) {
+        if (!grid.inBounds(
+                expected.source.x, expected.source.y, expected.source.z) ||
+            grid.at(
+                expected.source.x, expected.source.y,
+                expected.source.z).kind != BlockKind::Source ||
+            sourcePrimingTargetIndex(grid, expected.source) !=
+                expected.targetIndex) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int sourceCountInGrid(const Grid& grid) {
     int count = 0;
     for (int z = 0; z < grid.depth(); ++z) {
@@ -845,35 +895,6 @@ std::vector<Pos> fuelPositionsInGrid(const Grid& grid) {
         }
     }
     return positions;
-}
-
-std::vector<Block> replacementBlocks(const SupportBlockOptions* supportOptions) {
-    const SupportBlockOptions& support = effectiveSupportBlockOptions(supportOptions);
-    std::vector<SinkType> sinks = sinkTypes();
-    sinks.erase(std::remove_if(sinks.begin(), sinks.end(), [](const SinkType& sink) { return sink.cooling <= 0; }),
-                sinks.end());
-    std::sort(sinks.begin(), sinks.end(), [](const SinkType& lhs, const SinkType& rhs) {
-        return lhs.cooling > rhs.cooling;
-    });
-
-    std::vector<Block> blocks;
-    for (size_t i = 0; i < sinks.size() && i < 56; ++i) {
-        blocks.push_back({BlockKind::Sink, sinks.at(i).index});
-    }
-    blocks.push_back({BlockKind::Shield, 1});
-    blocks.push_back({BlockKind::Shield, 0});
-    for (int moderatorType : support.moderatorTypeIndices) {
-        if (validModeratorTypeIndex(moderatorType)) {
-            blocks.push_back({BlockKind::Moderator, moderatorType});
-        }
-    }
-    for (int reflectorType : support.reflectorTypeIndices) {
-        if (validReflectorTypeIndex(reflectorType)) {
-            blocks.push_back({BlockKind::Reflector, reflectorType});
-        }
-    }
-    blocks.push_back({BlockKind::Empty, -1});
-    return blocks;
 }
 
 bool isPreCompactRunnable(const FuelSimulation& sim);
@@ -1177,7 +1198,46 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
                           bool emptyOnly) {
     NCFR_PERF_COUNT(improveCalls);
     NCFR_PERF_SCOPE(improveNs);
-    const std::vector<Block> blocks = replacementBlocks(supportOptions);
+    const SupportBlockOptions& support =
+        effectiveSupportBlockOptions(supportOptions);
+    std::vector<SinkType> sinks = sinkTypes();
+    sinks.erase(
+        std::remove_if(
+            sinks.begin(), sinks.end(),
+            [](const SinkType& sink) { return sink.cooling <= 0; }),
+        sinks.end());
+    std::sort(
+        sinks.begin(), sinks.end(),
+        [](const SinkType& lhs, const SinkType& rhs) {
+            if (lhs.cooling != rhs.cooling) {
+                return lhs.cooling > rhs.cooling;
+            }
+            return lhs.index < rhs.index;
+        });
+
+    std::vector<Block> blocks;
+    blocks.reserve(
+        sinks.size() + support.moderatorTypeIndices.size() +
+        support.reflectorTypeIndices.size() + 3);
+    for (const SinkType& sink : sinks) {
+        blocks.push_back({BlockKind::Sink, sink.index});
+    }
+    blocks.push_back({BlockKind::Shield, 1});
+    blocks.push_back({BlockKind::Shield, 0});
+    for (int moderatorType : support.moderatorTypeIndices) {
+        if (validModeratorTypeIndex(moderatorType)) {
+            blocks.push_back({BlockKind::Moderator, moderatorType});
+        }
+    }
+    for (int reflectorType : support.reflectorTypeIndices) {
+        if (validReflectorTypeIndex(reflectorType)) {
+            blocks.push_back({BlockKind::Reflector, reflectorType});
+        }
+    }
+    blocks.push_back({BlockKind::Empty, -1});
+
+    const std::vector<SourcePrimingTarget> expectedSourceTargets =
+        sourcePrimingTargets(grid);
     for (int pass = 0; pass < options.maxPasses; ++pass) {
         throwIfCancelled(cancelRequested);
         NCFR_PERF_COUNT(improvePasses);
@@ -1205,6 +1265,10 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
                 Grid trial = grid;
                 trial.at(pos.x, pos.y, pos.z) = replacement;
                 removeUnclusteredCornerManaDustSinks(trial);
+                if (!matchesSourcePrimingTargets(
+                        trial, expectedSourceTargets)) {
+                    continue;
+                }
                 NCFR_PERF_COUNT(improveTrials);
                 FuelSimulation sim = simulateMixedFuel(trial);
                 CandidateScore trialScore = scoreSimulation(trial, sim);

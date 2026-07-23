@@ -58,12 +58,38 @@ struct SupportBlockOptions {
     std::vector<int> reflectorTypeIndices;
 };
 
+struct SourcePrimingTarget {
+    Pos source;
+    int targetIndex = -1;
+};
+
 struct FuelLineSpec {
     int direction = 0;
     int moderatorCount = 1;
     int moderatorType = 0;
     int reflectorType = 0;
     double estimatedFlux = 0.0;
+};
+
+struct MergeableSingleFuelLayout {
+    Grid grid;
+    FuelSimulation sim;
+    std::vector<int> sourceDirections;
+    std::vector<FuelLineSpec> fuelLines;
+};
+
+struct MergeableSingleFuelSearchGoal {
+    long long minimumCooling = 0;
+    long long pairedRawHeating = 0;
+    long long pairedCooling = 0;
+    bool allowCombinedBalance = false;
+};
+
+struct FuelLayoutContext {
+    int requestSlot = -1;
+    Pos fuelPos;
+    std::vector<int> sourceDirections;
+    std::vector<FuelLineSpec> fuelLines;
 };
 
 enum class FinalizeFailureKind {
@@ -123,10 +149,13 @@ void fillSupportBlocks(Grid& grid, const SupportBlockOptions* supportOptions = n
                        const StateVector* protectedPositions = nullptr);
 std::vector<Pos> fuelPositionsInGrid(const Grid& grid);
 bool allSourcesTargetFuel(const Grid& grid);
+std::vector<SourcePrimingTarget> sourcePrimingTargets(const Grid& grid);
+bool matchesSourcePrimingTargets(
+    const Grid& grid,
+    const std::vector<SourcePrimingTarget>& expectedTargets);
 bool hasRequiredSources(const Grid& grid, const BuildRequest& request);
 bool hasNoEmptyInteriorPlane(const Grid& grid);
 Grid compactEmptyInteriorPlanes(Grid grid);
-std::vector<Block> replacementBlocks(const SupportBlockOptions* supportOptions = nullptr);
 bool isSupportMutable(const Block& block);
 bool isRequiredSupportBlock(const Grid& grid, const FuelSimulation& sim, int idx);
 int countFunctionalIrradiators(const FuelSimulation& sim);
@@ -167,6 +196,9 @@ Pos offset(const Pos& pos, const Direction& dir, int distance);
 Pos sourcePositionForDirection(const Grid& grid, const Pos& fuelPos, const Direction& dir);
 std::vector<std::vector<int>> sourceDirectionCombinations(int sourceCount);
 std::vector<Dimension> singleFuelSearchDimensions();
+std::vector<FuelLineSpec> singleFuelLineOptions(const Fuel& fuel, const BuildRequest& request,
+                                                const std::vector<int>& sourceDirections,
+                                                int direction);
 bool placeDirectionalSources(Grid& grid, const BuildRequest& request, const Pos& fuelPos,
                              const std::vector<int>& sourceDirections);
 bool isFullyReflectiveReflector(const Block& block);
@@ -179,16 +211,31 @@ FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& re
                                                const std::vector<int>& sourceDirections,
                                                const std::vector<FuelLineSpec>& fuelLines,
                                                const StateVector* protectedPositions,
-                                               const std::atomic_bool* cancelRequested);
+                                               const std::atomic_bool* cancelRequested,
+                                               std::optional<MergeableSingleFuelLayout>* mergeableBest = nullptr,
+                                               const MergeableSingleFuelSearchGoal* mergeableGoal = nullptr,
+                                               bool* mergeableGoalReached = nullptr);
 OptimizationResult optimizeSingleFuelDirectionalLayout(const BuildRequest& request,
                                                        const std::vector<std::vector<int>>& sourceCombos,
                                                        const std::atomic_bool* cancelRequested);
 BuildRequest singleFuelRequestForSlot(const BuildRequest& request, int slot);
 OptimizationResult optimizeSingleFuelForSlot(const BuildRequest& request, int slot,
                                              const std::atomic_bool* cancelRequested);
+MergeableSingleFuelLayout optimizeMergeableSingleFuelForSlot(
+    const BuildRequest& request, int slot,
+    const MergeableSingleFuelSearchGoal& goal,
+    const std::atomic_bool* cancelRequested);
+std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
+    Grid grid, const BuildRequest& request,
+    const std::vector<FuelLayoutContext>& fuelContexts,
+    const std::atomic_bool* cancelRequested);
 bool heatPriorityLess(int lhsSlot, int rhsSlot, const BuildRequest& request);
 
 OptimizationResult optimizeDualFuelLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested);
+[[deprecated("use spatial merge dual-fuel strategy")]]
+OptimizationResult optimizeDualFuelTemplateLayoutDeprecated(
+    const BuildRequest& request,
+    const std::atomic_bool* cancelRequested);
 OptimizationResult optimizeQuadFuelLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested);
 OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
                                                    const std::atomic_bool* cancelRequested);

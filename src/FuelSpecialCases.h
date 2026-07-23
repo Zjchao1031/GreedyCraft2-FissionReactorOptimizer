@@ -17,6 +17,10 @@ inline constexpr long long kManaDustFallbackCoolingCapacity = 640;
 inline constexpr long long kCombinedHighHeatFallbackCoolingCapacity =
     kEndStoneCarobbiiteFallbackCoolingCapacity +
     kManaDustFallbackCoolingCapacity;
+inline constexpr long long kDualFuelStageCoolingTarget = 2190;
+inline constexpr long long kDualFuelEndStoneDeficitLimit = 650;
+inline constexpr long long kDualFuelCarobbiiteDeficitLimit = 1770;
+inline constexpr long long kDualFuelManaDustDeficitLimit = 2410;
 
 inline bool usesEndStoneOnlyReflectorCooling(const Fuel& fuel) {
     return fuel.heat > kEndStoneFallbackFuelHeatThreshold &&

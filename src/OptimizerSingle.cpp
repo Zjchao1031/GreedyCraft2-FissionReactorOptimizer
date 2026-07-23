@@ -38,6 +38,9 @@ struct SingleFuelSkeletonSearch {
     const std::vector<int>* sourceDirections = nullptr;
     const std::vector<std::vector<FuelLineSpec>>* perDirectionOptions = nullptr;
     const std::atomic_bool* cancelRequested = nullptr;
+    std::optional<MergeableSingleFuelLayout>* mergeableBest = nullptr;
+    const MergeableSingleFuelSearchGoal* mergeableGoal = nullptr;
+    bool* mergeableGoalReached = nullptr;
     int targetLineCount = 1;
 };
 
@@ -243,24 +246,6 @@ void markProtected(StateVector& protectedPositions, const Grid& grid, const Pos&
     }
 }
 
-void markSourcePathsProtected(StateVector& protectedPositions, const Grid& grid, const Pos& fuelPos,
-                              const std::vector<int>& sourceDirections) {
-    for (int sourceDirection : sourceDirections) {
-        const Direction& dir = kSourceDirections.at(static_cast<size_t>(sourceDirection));
-        Pos pos = sourcePositionForDirection(grid, fuelPos, dir);
-        while (grid.inBounds(pos.x, pos.y, pos.z)) {
-            markProtected(protectedPositions, grid, pos);
-            pos.x -= dir.dx;
-            pos.y -= dir.dy;
-            pos.z -= dir.dz;
-            if (!grid.inBounds(pos.x, pos.y, pos.z) ||
-                (pos.x == fuelPos.x && pos.y == fuelPos.y && pos.z == fuelPos.z)) {
-                break;
-            }
-        }
-    }
-}
-
 std::optional<BuiltSingleFuelSkeleton> buildSingleFuelSkeleton(const Dimension& dim,
                                                                const BuildRequest& request,
                                                                const std::vector<int>& sourceDirections,
@@ -304,7 +289,6 @@ std::optional<BuiltSingleFuelSkeleton> buildSingleFuelSkeleton(const Dimension& 
     if (!placeDirectionalSources(grid, request, fuelPos, sourceDirections)) {
         return std::nullopt;
     }
-    markSourcePathsProtected(protectedPositions, grid, fuelPos, sourceDirections);
     return BuiltSingleFuelSkeleton{std::move(grid), std::move(protectedPositions), spec.lines};
 }
 
@@ -709,7 +693,9 @@ std::optional<OptimizationResult> trySingleFuelSkeletonSpec(const SingleFuelSkel
     throwIfCancelled(search.cancelRequested);
     FinalizeResult result = tryFinalizeDirectionalCandidate(
         std::move(candidate->grid), *search.request, *search.sourceDirections, candidate->fuelLines,
-        &candidate->protectedPositions, search.cancelRequested);
+        &candidate->protectedPositions, search.cancelRequested,
+        search.mergeableBest, search.mergeableGoal,
+        search.mergeableGoalReached);
     if (result.result.has_value()) {
         NCFR_PERF_COUNT(bestUpdates);
         return std::move(*result.result);
@@ -748,8 +734,12 @@ std::optional<OptimizationResult> enumerateSingleFuelSkeletonSpecs(const SingleF
             }
             current.lines.push_back(option);
             current.estimatedFlux += option.estimatedFlux;
-            if (std::optional<OptimizationResult> result =
-                    enumerateSingleFuelSkeletonSpecs(search, direction + 1, current)) {
+            std::optional<OptimizationResult> result =
+                enumerateSingleFuelSkeletonSpecs(
+                    search, direction + 1, current);
+            if (result.has_value() ||
+                (search.mergeableGoalReached != nullptr &&
+                 *search.mergeableGoalReached)) {
                 return result;
             }
             current.estimatedFlux -= option.estimatedFlux;
@@ -774,8 +764,11 @@ std::optional<OptimizationResult> searchSingleFuelSkeletonSpecs(const SingleFuel
         throwIfCancelled(search.cancelRequested);
         localSearch.targetLineCount = lineCount;
         SingleFuelSkeletonSpec current;
-        if (std::optional<OptimizationResult> result =
-                enumerateSingleFuelSkeletonSpecs(localSearch, 0, current)) {
+        std::optional<OptimizationResult> result =
+            enumerateSingleFuelSkeletonSpecs(localSearch, 0, current);
+        if (result.has_value() ||
+            (localSearch.mergeableGoalReached != nullptr &&
+             *localSearch.mergeableGoalReached)) {
             return result;
         }
     }
@@ -957,6 +950,101 @@ std::optional<Grid> compactInteriorPlanesPreservingSources(const Grid& grid, con
     return applyDirectionalCompactionPlan(grid, *plan, request, sourceDirections, fuelLines);
 }
 
+int singleFuelHeatingClusterCount(const FuelSimulation& sim) {
+    return static_cast<int>(std::count_if(
+        sim.clusters.begin(), sim.clusters.end(),
+        [](const ClusterStats& cluster) {
+            return cluster.rawHeating > 0;
+        }));
+}
+
+bool hasValidHeatingSink(const Grid& grid, const FuelSimulation& sim) {
+    for (const Pos& pos : grid.interiorPositions()) {
+        const int idx = grid.index(pos.x, pos.y, pos.z);
+        if (grid.atIndex(idx).kind == BlockKind::Sink &&
+            sim.validSinks.at(static_cast<size_t>(idx)) &&
+            sim.heatingClusterBlocks.at(static_cast<size_t>(idx))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool betterMergeableSingleFuelLayout(
+    const MergeableSingleFuelLayout& candidate,
+    const MergeableSingleFuelLayout& current) {
+    if (candidate.sim.minClusterMargin != current.sim.minClusterMargin) {
+        return candidate.sim.minClusterMargin > current.sim.minClusterMargin;
+    }
+    if (candidate.sim.cooling != current.sim.cooling) {
+        return candidate.sim.cooling > current.sim.cooling;
+    }
+    const int candidateVolume =
+        candidate.grid.internalA() * candidate.grid.internalB() *
+        candidate.grid.internalC();
+    const int currentVolume =
+        current.grid.internalA() * current.grid.internalB() *
+        current.grid.internalC();
+    if (candidateVolume != currentVolume) {
+        return candidateVolume < currentVolume;
+    }
+    return countUsefulBlocks(candidate.grid) <
+           countUsefulBlocks(current.grid);
+}
+
+bool mergeableSingleFuelGoalReached(
+    const FuelSimulation& sim,
+    const MergeableSingleFuelSearchGoal& goal) {
+    if (sim.cooling >= goal.minimumCooling) {
+        return true;
+    }
+    return goal.allowCombinedBalance &&
+           goal.pairedCooling + sim.cooling >=
+               goal.pairedRawHeating + sim.rawHeating;
+}
+
+void considerMergeableSingleFuelLayout(
+    const Grid& grid, const BuildRequest& request,
+    const std::vector<int>& sourceDirections,
+    const std::vector<FuelLineSpec>& fuelLines,
+    std::optional<MergeableSingleFuelLayout>* mergeableBest,
+    const MergeableSingleFuelSearchGoal* mergeableGoal,
+    bool* mergeableGoalReached) {
+    if (mergeableBest == nullptr) {
+        return;
+    }
+
+    FuelSimulation sim = simulateMixedFuel(grid);
+    if (!isPreCompactRunnable(sim) ||
+        !hasSafeFuelFlux(grid, sim) ||
+        sim.disconnectedFunctionalBlocks != 0 ||
+        hasInvalidSinks(grid, sim) ||
+        singleFuelHeatingClusterCount(sim) != 1 ||
+        !hasValidHeatingSink(grid, sim) ||
+        !hasRequiredSources(grid, request)) {
+        return;
+    }
+
+    if (mergeableGoal != nullptr &&
+        !mergeableSingleFuelGoalReached(sim, *mergeableGoal)) {
+        return;
+    }
+
+    MergeableSingleFuelLayout candidate{
+        grid,
+        std::move(sim),
+        sourceDirections,
+        fuelLines,
+    };
+    if (!mergeableBest->has_value() ||
+        betterMergeableSingleFuelLayout(candidate, **mergeableBest)) {
+        *mergeableBest = std::move(candidate);
+    }
+    if (mergeableGoalReached != nullptr) {
+        *mergeableGoalReached = true;
+    }
+}
+
 FinalizeResult acceptedResultFromImprovedGrid(Grid improved, const FuelSimulation& sim,
                                               const BuildRequest& request,
                                               const std::vector<int>& sourceDirections,
@@ -1068,9 +1156,9 @@ bool isCarobbiiteSink(const Block& block) {
 void markDirectionalLayoutProtected(StateVector& protectedPositions, const Grid& grid,
                                       const Pos& fuelPos,
                                       const std::vector<int>& sourceDirections,
-                                      const std::vector<FuelLineSpec>& fuelLines) {
+    const std::vector<FuelLineSpec>& fuelLines) {
     markProtected(protectedPositions, grid, fuelPos);
-    markSourcePathsProtected(protectedPositions, grid, fuelPos, sourceDirections);
+    (void)sourceDirections;
     for (const FuelLineSpec& line : fuelLines) {
         const Direction& dir = kSourceDirections.at(static_cast<size_t>(line.direction));
         for (int distance = 1; distance <= line.moderatorCount + 1; ++distance) {
@@ -1350,6 +1438,37 @@ bool connectSpecialSinksToHeatingCluster(
     return true;
 }
 
+std::vector<Pos> placedSpecialCoolingSinkPositions(const Grid& grid) {
+    std::vector<Pos> positions;
+    const int endStoneType = endStoneSinkType();
+    const int carobbiiteType = carobbiiteSinkType();
+    const auto appendMatchingSinks =
+        [&](const auto& matches) {
+            for (const Pos& pos : grid.interiorPositions()) {
+                const Block& block =
+                    grid.at(pos.x, pos.y, pos.z);
+                if (block.kind == BlockKind::Sink &&
+                    matches(block)) {
+                    positions.push_back(pos);
+                }
+            }
+        };
+
+    appendMatchingSinks(
+        [endStoneType](const Block& block) {
+            return block.type == endStoneType;
+        });
+    appendMatchingSinks(
+        [carobbiiteType](const Block& block) {
+            return block.type == carobbiiteType;
+        });
+    appendMatchingSinks(
+        [](const Block& block) {
+            return isManaDustSink(block);
+        });
+    return positions;
+}
+
 bool hasFunctionalEndStoneSinks(
     const Grid& grid, const FuelSimulation& sim,
     const std::vector<FuelLineSpec>& fuelLines,
@@ -1493,6 +1612,67 @@ void logHighHeatFinalReview(
        << " carobbiiteFunctional=" << (carobbiiteFunctional ? 1 : 0);
     NCFR_PERF_CHECKPOINT("highHeatFinalReview", os.str().c_str());
 }
+
+void logDualFuelCoolingCheckpoint(
+    const char* reason, const Grid& grid, const FuelSimulation& sim,
+    long long initialDeficit, bool allowCarobbiite, bool allowManaDust,
+    const std::string& detail = {}) {
+    std::ostringstream os;
+    os << "reason=" << reason
+       << " grid=" << gridInteriorLabel(grid)
+       << " rawHeating=" << sim.rawHeating
+       << " cooling=" << sim.cooling
+       << " deficit=" << (sim.rawHeating - sim.cooling)
+       << " initialDeficit=" << initialDeficit
+       << " minMargin=" << sim.minClusterMargin
+       << " compatible=" << (sim.compatible ? 1 : 0)
+       << " safeFlux=" << (hasSafeFuelFlux(grid, sim) ? 1 : 0)
+       << " disconnected=" << sim.disconnectedFunctionalBlocks
+       << " invalidSinks=" << (hasInvalidSinks(grid, sim) ? 1 : 0)
+       << " allowCarobbiite=" << (allowCarobbiite ? 1 : 0)
+       << " allowManaDust=" << (allowManaDust ? 1 : 0);
+    if (!detail.empty()) {
+        os << " detail=" << detail;
+    }
+    NCFR_PERF_CHECKPOINT("dualFuelCooling", os.str().c_str());
+}
+
+void logDualFuelSinkCheckpoint(
+    const char* stage, int requestSlot, const Pos& pos, int faceDirection,
+    const char* outcome, const Grid& grid,
+    const std::string& detail = {},
+    const HighHeatPlacementFailureStats* stats = nullptr) {
+    std::ostringstream os;
+    os << "stage=" << stage
+       << " slot=" << requestSlot
+       << " pos=" << posLabel(pos)
+       << " faceDirection=" << faceDirection
+       << " outcome=" << outcome
+       << " grid=" << gridInteriorLabel(grid);
+    if (stats != nullptr) {
+        appendHighHeatFailureStats(os, "fail", *stats);
+    }
+    if (!detail.empty()) {
+        os << " detail=" << detail;
+    }
+    NCFR_PERF_CHECKPOINT("dualFuelSink", os.str().c_str());
+}
+
+void logDualFuelFallbackCheckpoint(
+    const char* reason, const Grid& grid, const FuelSimulation& sim,
+    long long initialDeficit, const std::string& detail = {}) {
+    std::ostringstream os;
+    os << "reason=" << reason
+       << " grid=" << gridInteriorLabel(grid)
+       << " rawHeating=" << sim.rawHeating
+       << " cooling=" << sim.cooling
+       << " deficit=" << (sim.rawHeating - sim.cooling)
+       << " initialDeficit=" << initialDeficit;
+    if (!detail.empty()) {
+        os << " detail=" << detail;
+    }
+    NCFR_PERF_CHECKPOINT("dualFuelFallback", os.str().c_str());
+}
 #endif
 
 bool hasFunctionalSpecialManaDustCornerSinks(const Grid& grid, const FuelSimulation& sim) {
@@ -1514,110 +1694,14 @@ bool hasFunctionalSpecialManaDustCornerSinks(const Grid& grid, const FuelSimulat
     return true;
 }
 
-std::optional<std::pair<int, int>> keptCoordinateBounds(const std::vector<bool>& keep) {
-    int first = -1;
-    int last = -1;
-    for (int value = 1; value < static_cast<int>(keep.size()); ++value) {
-        if (!keep.at(static_cast<size_t>(value))) {
-            continue;
-        }
-        if (first < 0) {
-            first = value;
-        }
-        last = value;
-    }
-    if (first < 0 || first == last) {
-        return std::nullopt;
-    }
-    return std::pair<int, int>{first, last};
-}
-
-std::optional<std::vector<Pos>> plannedManaDustCornerPositions(
-    const DirectionalCompactionPlan& plan) {
-    const auto x = keptCoordinateBounds(plan.keepX);
-    const auto y = keptCoordinateBounds(plan.keepY);
-    const auto z = keptCoordinateBounds(plan.keepZ);
-    if (!x.has_value() || !y.has_value() || !z.has_value()) {
-        return std::nullopt;
-    }
-    return std::vector<Pos>{
-        {x->first, y->first, z->first},
-        {x->second, y->first, z->first},
-        {x->first, y->second, z->first},
-        {x->second, y->second, z->first},
-        {x->first, y->first, z->second},
-        {x->second, y->first, z->second},
-        {x->first, y->second, z->second},
-        {x->second, y->second, z->second},
-    };
-}
-
-void protectPositionsOutsideCompactionPlan(
-    StateVector& protectedPositions, const Grid& grid,
-    const DirectionalCompactionPlan& plan) {
-    for (const Pos& pos : grid.interiorPositions()) {
-        if (!plan.keepX.at(static_cast<size_t>(pos.x)) ||
-            !plan.keepY.at(static_cast<size_t>(pos.y)) ||
-            !plan.keepZ.at(static_cast<size_t>(pos.z))) {
-            protectedPositions.at(
-                static_cast<size_t>(grid.index(pos.x, pos.y, pos.z))) = true;
-        }
-    }
-}
-
-StateVector forcePlaceSpecialManaDustCornerSinks(
-    Grid& grid, StateVector& protectedPositions,
-    const std::vector<Pos>& corners,
-    const DirectionalCompactionPlan& plan
+std::optional<Grid> padMixedFuelGridForSpecialCooling(
+    const Grid& grid, const BuildRequest& request,
+    const std::vector<FuelLayoutContext>& fuelContexts,
+    std::vector<FuelLayoutContext>& paddedContexts
 #ifndef NDEBUG
-    , HighHeatPlacementFailureStats* debugStats = nullptr
+    , const char** debugFailure
 #endif
-) {
-#ifdef NDEBUG
-    (void)plan;
-#endif
-    StateVector forcedValidSinks(static_cast<size_t>(grid.volume()), false);
-    const int sinkType = manaDustSinkType();
-    if (sinkType < 0 || corners.size() != 8) {
-#ifndef NDEBUG
-        if (debugStats != nullptr) ++debugStats->sinkTypeMissing;
-#endif
-        return forcedValidSinks;
-    }
-
-    for (const Pos& corner : corners) {
-        const int idx = grid.index(corner.x, corner.y, corner.z);
-        const Block original = grid.atIndex(idx);
-        if (original.kind != BlockKind::Empty && !isManaDustSink(original)) {
-#ifndef NDEBUG
-            if (debugStats != nullptr) ++debugStats->occupied;
-            std::ostringstream os;
-            os << "pos=" << posLabel(corner)
-               << " oldKind=" << blockKindLabel(original.kind)
-               << " oldType=" << original.type;
-            NCFR_PERF_CHECKPOINT("manaDust.forceOverwrite", os.str().c_str());
-#endif
-        }
-        grid.atIndex(idx) = {BlockKind::Sink, sinkType};
-        protectedPositions.at(static_cast<size_t>(idx)) = true;
-        forcedValidSinks.at(static_cast<size_t>(idx)) = true;
-#ifndef NDEBUG
-        {
-            const Pos finalCorner{
-                plan.mapX.at(static_cast<size_t>(corner.x)),
-                plan.mapY.at(static_cast<size_t>(corner.y)),
-                plan.mapZ.at(static_cast<size_t>(corner.z)),
-            };
-            std::ostringstream os;
-            os << "searchPos=" << posLabel(corner)
-               << " finalPos=" << posLabel(finalCorner)
-               << " forcedValid=1";
-            NCFR_PERF_CHECKPOINT("manaDust.cornerMap", os.str().c_str());
-        }
-#endif
-    }
-    return forcedValidSinks;
-}
+);
 
 bool anyHeatingClusterBlock(const FuelSimulation& sim) {
     return std::find(sim.heatingClusterBlocks.begin(), sim.heatingClusterBlocks.end(), 1U) !=
@@ -1635,63 +1719,90 @@ std::optional<FinalizeResult> trySpecialManaDustFinalization(
         return std::nullopt;
     }
 
-    const std::optional<DirectionalCompactionPlan> compactionPlan =
-        buildDirectionalCompactionPlan(grid, 0, true);
-    if (!compactionPlan.has_value()) {
-        return std::nullopt;
-    }
-    const std::optional<std::vector<Pos>> plannedCorners =
-        plannedManaDustCornerPositions(*compactionPlan);
-    if (!plannedCorners.has_value()) {
-        return std::nullopt;
-    }
-
-    Grid specialGrid = grid;
-    StateVector specialProtected(static_cast<size_t>(specialGrid.volume()), false);
-    if (protectedPositions != nullptr &&
-        protectedPositions->size() == specialProtected.size()) {
-        specialProtected = *protectedPositions;
-    }
-    const std::vector<Pos> fuelPositions = fuelPositionsInGrid(specialGrid);
+    (void)protectedPositions;
+    const std::vector<Pos> fuelPositions = fuelPositionsInGrid(grid);
     if (fuelPositions.size() != request.fuelIndices.size()) {
         return std::nullopt;
     }
     const Pos fuelPos = fuelPositions.front();
-    markDirectionalLayoutProtected(specialProtected, specialGrid, fuelPos,
-                                   sourceDirections, fuelLines);
-    protectPositionsOutsideCompactionPlan(
-        specialProtected, specialGrid, *compactionPlan);
-
+    const std::vector<FuelLayoutContext> fuelContexts{
+        {0, fuelPos, sourceDirections, fuelLines},
+    };
+    std::vector<FuelLayoutContext> paddedContexts;
 #ifndef NDEBUG
-    HighHeatPlacementFailureStats manaDustPlacementStats;
-    HighHeatPlacementFailureStats manaDustConnectionStats;
+    const char* manaPaddingFailure = "unknown";
 #endif
-    StateVector forcedValidSinks =
-        forcePlaceSpecialManaDustCornerSinks(
-            specialGrid, specialProtected, *plannedCorners, *compactionPlan
+    std::optional<Grid> padded = padMixedFuelGridForSpecialCooling(
+        grid, request, fuelContexts, paddedContexts
 #ifndef NDEBUG
-            , &manaDustPlacementStats
+        , &manaPaddingFailure
 #endif
-            );
-    if (std::count(forcedValidSinks.begin(), forcedValidSinks.end(), 1U) != 8) {
+        );
+    if (!padded.has_value()) {
 #ifndef NDEBUG
-        logHighHeatPlacementFailures("mana_dust_place", specialGrid,
-                                     manaDustPlacementStats);
+        NCFR_PERF_CHECKPOINT("manaDust.padding", manaPaddingFailure);
 #endif
         return std::nullopt;
     }
 
+    Grid specialGrid = std::move(*padded);
+    StateVector specialProtected(
+        static_cast<size_t>(specialGrid.volume()), false);
+    markOccupiedInteriorProtected(specialProtected, specialGrid);
+    const std::vector<Pos> corners =
+        interiorCornerPositions(specialGrid);
+    const std::vector<SourcePrimingTarget> paddedSourceTargets =
+        sourcePrimingTargets(specialGrid);
+#ifndef NDEBUG
+    HighHeatPlacementFailureStats manaDustPlacementStats;
+    HighHeatPlacementFailureStats manaDustConnectionStats;
+#endif
+    StateVector forcedValidSinks(
+        static_cast<size_t>(specialGrid.volume()), false);
+    const int manaType = manaDustSinkType();
+    if (manaType < 0 || corners.size() != 8) {
+#ifndef NDEBUG
+        ++manaDustPlacementStats.sinkTypeMissing;
+        logHighHeatPlacementFailures(
+            "mana_dust_place", specialGrid, manaDustPlacementStats);
+#endif
+        return std::nullopt;
+    }
+    for (const Pos& corner : corners) {
+        const int idx =
+            specialGrid.index(corner.x, corner.y, corner.z);
+        if (specialGrid.atIndex(idx).kind != BlockKind::Empty) {
+#ifndef NDEBUG
+            ++manaDustPlacementStats.occupied;
+            logHighHeatPlacementFailures(
+                "mana_dust_place", specialGrid,
+                manaDustPlacementStats,
+                "corner=" + posLabel(corner));
+#endif
+            return std::nullopt;
+        }
+        specialGrid.atIndex(idx) = {BlockKind::Sink, manaType};
+        specialProtected.at(static_cast<size_t>(idx)) = true;
+        forcedValidSinks.at(static_cast<size_t>(idx)) = true;
+    }
+
     const SimulationOptions searchOptions{&forcedValidSinks};
     FuelSimulation currentSim = simulateMixedFuel(specialGrid, searchOptions);
+    const std::vector<Pos> specialSinkPositions =
+        placedSpecialCoolingSinkPositions(specialGrid);
     if (!isPreCompactRunnable(currentSim) ||
         !hasSafeFuelFlux(specialGrid, currentSim) ||
+        !matchesSourcePrimingTargets(
+            specialGrid, paddedSourceTargets) ||
         !connectSpecialSinksToHeatingCluster(
-            specialGrid, currentSim, *plannedCorners, specialProtected,
+            specialGrid, currentSim, specialSinkPositions, specialProtected,
             cancelRequested, searchOptions
 #ifndef NDEBUG
             , &manaDustConnectionStats
 #endif
             ) ||
+        !matchesSourcePrimingTargets(
+            specialGrid, paddedSourceTargets) ||
         !isSearchOperatingSimulation(specialGrid, currentSim)) {
 #ifndef NDEBUG
         logHighHeatPlacementFailures("mana_dust_connect", specialGrid,
@@ -1706,7 +1817,10 @@ std::optional<FinalizeResult> trySpecialManaDustFinalization(
                                  "placed=8");
     logHighHeatPlacementFailures("mana_dust_connect", specialGrid,
                                  manaDustConnectionStats,
-                                 "placed=8 forcedValid=8");
+                                 "placed=8 specialSinks=" +
+                                     std::to_string(
+                                         specialSinkPositions.size()) +
+                                     " forcedValid=8");
     {
         std::ostringstream os;
         os << "grid=" << gridInteriorLabel(specialGrid)
@@ -1718,8 +1832,9 @@ std::optional<FinalizeResult> trySpecialManaDustFinalization(
     }
 #endif
 
-    std::optional<Grid> compacted = applyDirectionalCompactionPlan(
-        specialGrid, *compactionPlan, request, sourceDirections, fuelLines);
+    std::optional<Grid> compacted =
+        compactInteriorPlanesPreservingSources(
+            specialGrid, request, sourceDirections, fuelLines, 0, true);
     if (!compacted.has_value()) {
         return std::nullopt;
     }
@@ -1727,7 +1842,8 @@ std::optional<FinalizeResult> trySpecialManaDustFinalization(
     const bool compactedSafe =
         isSafeOperatingSimulation(*compacted, finalSim);
     if (!compactedSafe ||
-        !hasFunctionalSpecialManaDustCornerSinks(*compacted, finalSim)) {
+        !hasFunctionalSpecialManaDustCornerSinks(*compacted, finalSim) ||
+        !hasRequiredSources(*compacted, request)) {
 #ifndef NDEBUG
         const WallConnectionResult wall =
             evaluateHeatingClusterWallConnections(*compacted, finalSim);
@@ -1872,6 +1988,29 @@ std::optional<FinalizeResult> tryHighHeatSingleFuelFinalization(
 #endif
     }
 
+    currentSim = simulateMixedFuel(specialGrid);
+    if (currentSim.cooling < currentSim.rawHeating) {
+        if (isSpecialManaDustRequest(request) &&
+            hasSpecialManaDustCoolingDeficit(currentSim)) {
+#ifndef NDEBUG
+            logHighHeatCoolingCheckpoint(
+                "manaDustHandoff", specialGrid, currentSim,
+                endStoneCandidates->size(), 0,
+                occupiedEndStonePositions, 0,
+                carobbiiteCandidates.size(),
+                placedCarobbiiteFaces.size(),
+                failedCarobbiitePlacements, 0);
+#endif
+            if (std::optional<FinalizeResult> manaDustResult =
+                    trySpecialManaDustFinalization(
+                        specialGrid, currentSim, request, sourceDirections,
+                        fuelLines, &specialProtected, cancelRequested)) {
+                return std::move(*manaDustResult);
+            }
+        }
+        return std::nullopt;
+    }
+
     std::vector<EndStoneReflectorCandidate> unresolvedEndStoneCandidates;
 #ifndef NDEBUG
     HighHeatPlacementFailureStats endStoneConnectionStats;
@@ -1932,24 +2071,6 @@ std::optional<FinalizeResult> tryHighHeatSingleFuelFinalization(
                            placedEndStoneFaces.size(),
                            placedCarobbiiteFaces.size());
 #endif
-    if (!prePruneAccepted &&
-        isSpecialManaDustRequest(request) &&
-        hasSpecialManaDustCoolingDeficit(currentSim)) {
-#ifndef NDEBUG
-        logHighHeatCoolingCheckpoint(
-            "manaDustHandoff", specialGrid, currentSim,
-            endStoneCandidates->size(), placedEndStoneFaces.size(),
-            occupiedEndStonePositions, failedEndStoneConnections,
-            carobbiiteCandidates.size(), placedCarobbiiteFaces.size(),
-            failedCarobbiitePlacements, 0);
-#endif
-        if (std::optional<FinalizeResult> manaDustResult =
-                trySpecialManaDustFinalization(
-                    specialGrid, currentSim, request, sourceDirections,
-                    fuelLines, &specialProtected, cancelRequested)) {
-            return std::move(*manaDustResult);
-        }
-    }
     if (!prePruneAccepted) {
         return std::nullopt;
     }
@@ -2015,6 +2136,738 @@ std::optional<FinalizeResult> tryHighHeatSingleFuelFinalization(
     return finalResult;
 }
 
+std::optional<Grid> padMixedFuelGridForSpecialCooling(
+    const Grid& grid, const BuildRequest& request,
+    const std::vector<FuelLayoutContext>& fuelContexts,
+    std::vector<FuelLayoutContext>& paddedContexts
+#ifndef NDEBUG
+    , const char** debugFailure = nullptr
+#endif
+) {
+#ifndef NDEBUG
+    const auto fail = [debugFailure](const char* reason) {
+        if (debugFailure != nullptr) {
+            *debugFailure = reason;
+        }
+        return std::optional<Grid>{};
+    };
+#endif
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int minZ = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    int maxZ = std::numeric_limits<int>::min();
+    for (const Pos& pos : grid.interiorPositions()) {
+        if (grid.at(pos.x, pos.y, pos.z).kind == BlockKind::Empty) {
+            continue;
+        }
+        minX = std::min(minX, pos.x);
+        minY = std::min(minY, pos.y);
+        minZ = std::min(minZ, pos.z);
+        maxX = std::max(maxX, pos.x);
+        maxY = std::max(maxY, pos.y);
+        maxZ = std::max(maxZ, pos.z);
+    }
+    if (minX > maxX || minY > maxY || minZ > maxZ) {
+#ifndef NDEBUG
+        return fail("emptyInterior");
+#else
+        return std::nullopt;
+#endif
+    }
+
+    const int newA = maxX - minX + 3;
+    const int newB = maxY - minY + 3;
+    const int newC = maxZ - minZ + 3;
+    if (newA > kMaxSize || newB > kMaxSize ||
+        newC > kMaxSize) {
+#ifndef NDEBUG
+        return fail("paddedGridExceedsMaxSize");
+#else
+        return std::nullopt;
+#endif
+    }
+
+    Grid padded = makeShell(newA, newB, newC);
+    for (const Pos& pos : grid.interiorPositions()) {
+        const Block& block = grid.at(pos.x, pos.y, pos.z);
+        if (block.kind == BlockKind::Empty) {
+            continue;
+        }
+        padded.at(
+            pos.x - minX + 2,
+            pos.y - minY + 2,
+            pos.z - minZ + 2) = block;
+    }
+
+    paddedContexts = fuelContexts;
+    for (FuelLayoutContext& context : paddedContexts) {
+        context.fuelPos = {
+            context.fuelPos.x - minX + 2,
+            context.fuelPos.y - minY + 2,
+            context.fuelPos.z - minZ + 2,
+        };
+    }
+
+    const std::vector<SourcePrimingTarget> oldTargets =
+        sourcePrimingTargets(grid);
+    for (size_t contextIndex = 0;
+         contextIndex < fuelContexts.size(); ++contextIndex) {
+        const FuelLayoutContext& oldContext =
+            fuelContexts.at(contextIndex);
+        const FuelLayoutContext& newContext =
+            paddedContexts.at(contextIndex);
+        if (oldContext.requestSlot < 0 ||
+            oldContext.requestSlot >=
+                static_cast<int>(request.fuelIndices.size())) {
+#ifndef NDEBUG
+            return fail("invalidRequestSlot");
+#else
+            return std::nullopt;
+#endif
+        }
+        const Fuel& fuel = fuels().at(static_cast<size_t>(
+            request.fuelIndices.at(
+                static_cast<size_t>(oldContext.requestSlot))));
+        if (fuel.selfPriming) {
+            continue;
+        }
+
+        const int oldFuelIndex = grid.index(
+            oldContext.fuelPos.x, oldContext.fuelPos.y,
+            oldContext.fuelPos.z);
+        const auto target = std::find_if(
+            oldTargets.begin(), oldTargets.end(),
+            [oldFuelIndex](const SourcePrimingTarget& value) {
+                return value.targetIndex == oldFuelIndex;
+            });
+        if (target == oldTargets.end()) {
+#ifndef NDEBUG
+            return fail("sourceTargetMissing");
+#else
+            return std::nullopt;
+#endif
+        }
+
+        int sourceDirection = -1;
+        for (int directionIndex = 0;
+             directionIndex <
+             static_cast<int>(kSourceDirections.size());
+             ++directionIndex) {
+            const Pos expected = sourcePositionForDirection(
+                grid, oldContext.fuelPos,
+                kSourceDirections.at(
+                    static_cast<size_t>(directionIndex)));
+            if (samePos(expected, target->source)) {
+                sourceDirection = directionIndex;
+                break;
+            }
+        }
+        if (sourceDirection < 0) {
+#ifndef NDEBUG
+            return fail("sourceDirectionUnknown");
+#else
+            return std::nullopt;
+#endif
+        }
+
+        const Direction& direction = kSourceDirections.at(
+            static_cast<size_t>(sourceDirection));
+        const Pos sourcePos = sourcePositionForDirection(
+            padded, newContext.fuelPos, direction);
+        padded.at(sourcePos.x, sourcePos.y, sourcePos.z) = {
+            BlockKind::Source, -1};
+        if (sourcePrimingTargetIndex(padded, sourcePos) !=
+            padded.index(
+                newContext.fuelPos.x, newContext.fuelPos.y,
+                newContext.fuelPos.z)) {
+#ifndef NDEBUG
+            return fail("sourceTargetChanged");
+#else
+            return std::nullopt;
+#endif
+        }
+    }
+
+    if (!hasRequiredSources(padded, request)) {
+#ifndef NDEBUG
+        return fail("requiredSourcesInvalid");
+#else
+        return std::nullopt;
+#endif
+    }
+    return padded;
+}
+
+std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
+    Grid grid, const BuildRequest& request,
+    const std::vector<FuelLayoutContext>& fuelContexts,
+    const std::atomic_bool* cancelRequested) {
+    FuelSimulation currentSim = simulateMixedFuel(grid);
+    const long long initialDeficit =
+        currentSim.rawHeating - currentSim.cooling;
+    if (fuelContexts.empty()) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "rejected", grid, currentSim, initialDeficit,
+            "emptyFuelContexts");
+#endif
+        return std::nullopt;
+    }
+    if (!isPreCompactRunnable(currentSim)) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "rejected", grid, currentSim, initialDeficit, "notRunnable");
+#endif
+        return std::nullopt;
+    }
+    if (!hasSafeFuelFlux(grid, currentSim)) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "rejected", grid, currentSim, initialDeficit, "unsafeFlux");
+#endif
+        return std::nullopt;
+    }
+    if (currentSim.disconnectedFunctionalBlocks != 0) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "rejected", grid, currentSim, initialDeficit, "disconnected");
+#endif
+        return std::nullopt;
+    }
+    if (hasInvalidSinks(grid, currentSim)) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "rejected", grid, currentSim, initialDeficit, "invalidSinks");
+#endif
+        return std::nullopt;
+    }
+
+    if (initialDeficit <= 0) {
+#ifndef NDEBUG
+        logDualFuelCoolingCheckpoint(
+            "baseline", grid, currentSim, initialDeficit, false, false,
+            "alreadyBalanced");
+#endif
+        return isSearchAccepted(grid, currentSim)
+                   ? std::optional<Grid>(std::move(grid))
+                   : std::nullopt;
+    }
+    if (initialDeficit > kDualFuelManaDustDeficitLimit) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "rejected", grid, currentSim, initialDeficit,
+            "deficitExceedsManaDustLimit");
+#endif
+        return std::nullopt;
+    }
+    const bool allowCarobbiite =
+        initialDeficit > kDualFuelEndStoneDeficitLimit;
+    const bool allowManaDust =
+        initialDeficit > kDualFuelCarobbiiteDeficitLimit;
+
+#ifndef NDEBUG
+    logDualFuelCoolingCheckpoint(
+        "baseline", grid, currentSim, initialDeficit,
+        allowCarobbiite, allowManaDust,
+        "fuelContexts=" + std::to_string(fuelContexts.size()));
+#endif
+
+    const std::vector<SourcePrimingTarget> expectedSourceTargets =
+        sourcePrimingTargets(grid);
+    StateVector protectedPositions(
+        static_cast<size_t>(grid.volume()), false);
+    markOccupiedInteriorProtected(protectedPositions, grid);
+
+    auto connectPlacedSpecialSinks =
+        [&](Grid& finalGrid, FuelSimulation& finalSim,
+            StateVector& finalProtected,
+            const SimulationOptions& connectionOptions,
+            const char* checkpoint) {
+#ifdef NDEBUG
+            (void)checkpoint;
+#endif
+            struct SpecialSinkConnection {
+                Pos pos;
+                const char* stage = "";
+                int priority = 0;
+            };
+
+            const int endStoneType = endStoneSinkType();
+            const int carobbiiteType = carobbiiteSinkType();
+            std::vector<SpecialSinkConnection> sinks;
+            for (const Pos& pos : finalGrid.interiorPositions()) {
+                const Block& block =
+                    finalGrid.at(pos.x, pos.y, pos.z);
+                if (block.kind != BlockKind::Sink) {
+                    continue;
+                }
+                if (block.type == endStoneType) {
+                    sinks.push_back({pos, "end_stone", 0});
+                } else if (block.type == carobbiiteType) {
+                    sinks.push_back({pos, "carobbiite", 1});
+                } else if (isManaDustSink(block)) {
+                    sinks.push_back({pos, "mana_dust", 2});
+                }
+            }
+            std::sort(
+                sinks.begin(), sinks.end(),
+                [](const SpecialSinkConnection& lhs,
+                   const SpecialSinkConnection& rhs) {
+                    if (lhs.priority != rhs.priority) {
+                        return lhs.priority < rhs.priority;
+                    }
+                    if (lhs.pos.z != rhs.pos.z) {
+                        return lhs.pos.z < rhs.pos.z;
+                    }
+                    if (lhs.pos.y != rhs.pos.y) {
+                        return lhs.pos.y < rhs.pos.y;
+                    }
+                    return lhs.pos.x < rhs.pos.x;
+                });
+            if (sinks.empty()) {
+#ifndef NDEBUG
+                logDualFuelFallbackCheckpoint(
+                    "connectionsRejected", finalGrid, finalSim,
+                    initialDeficit, "noSpecialSinks");
+#endif
+                return false;
+            }
+
+            const std::vector<SourcePrimingTarget> sourceTargets =
+                sourcePrimingTargets(finalGrid);
+            finalSim =
+                simulateMixedFuel(finalGrid, connectionOptions);
+            for (const SpecialSinkConnection& sink : sinks) {
+#ifndef NDEBUG
+                HighHeatPlacementFailureStats connectionStats;
+#endif
+                if (!tryConnectSpecialSinkToHeatingCluster(
+                        finalGrid, finalSim, sink.pos, finalProtected,
+                        cancelRequested, connectionOptions
+#ifndef NDEBUG
+                        , &connectionStats
+#endif
+                        )) {
+#ifndef NDEBUG
+                    logDualFuelSinkCheckpoint(
+                        sink.stage, -1, sink.pos, -1,
+                        "connectionFailed", finalGrid, {},
+                        &connectionStats);
+#endif
+                    return false;
+                }
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    sink.stage, -1, sink.pos, -1, "connected",
+                    finalGrid,
+                    "cooling=" + std::to_string(finalSim.cooling));
+#endif
+            }
+            if (!matchesSourcePrimingTargets(finalGrid, sourceTargets)) {
+#ifndef NDEBUG
+                logDualFuelFallbackCheckpoint(
+                    "connectionsRejected", finalGrid, finalSim,
+                    initialDeficit, "sourceTargetChanged");
+#endif
+                return false;
+            }
+
+            finalSim = simulateMixedFuel(finalGrid);
+#ifndef NDEBUG
+            logDualFuelCoolingCheckpoint(
+                checkpoint, finalGrid, finalSim, initialDeficit,
+                allowCarobbiite, allowManaDust,
+                "specialSinks=" + std::to_string(sinks.size()));
+#endif
+            if (!isSearchAccepted(finalGrid, finalSim) ||
+                hasInvalidSinks(finalGrid, finalSim) ||
+                finalSim.disconnectedFunctionalBlocks != 0) {
+#ifndef NDEBUG
+                logDualFuelFallbackCheckpoint(
+                    "connectionsRejected", finalGrid, finalSim,
+                    initialDeficit, "finalValidationFailed");
+#endif
+                return false;
+            }
+            return true;
+        };
+
+    struct ContextReflectorCandidates {
+        const FuelLayoutContext* context = nullptr;
+        std::vector<EndStoneReflectorCandidate> endStone;
+    };
+
+    std::vector<const FuelLayoutContext*> orderedContexts;
+    orderedContexts.reserve(fuelContexts.size());
+    for (const FuelLayoutContext& context : fuelContexts) {
+        orderedContexts.push_back(&context);
+    }
+    std::sort(
+        orderedContexts.begin(), orderedContexts.end(),
+        [&](const FuelLayoutContext* lhs,
+            const FuelLayoutContext* rhs) {
+            return heatPriorityLess(
+                lhs->requestSlot, rhs->requestSlot, request);
+        });
+
+    std::vector<ContextReflectorCandidates> reflectorCandidates;
+    reflectorCandidates.reserve(orderedContexts.size());
+    for (const FuelLayoutContext* context : orderedContexts) {
+        throwIfCancelled(cancelRequested);
+        if (context->requestSlot < 0 ||
+            context->requestSlot >=
+                static_cast<int>(request.fuelIndices.size())) {
+#ifndef NDEBUG
+            logDualFuelFallbackCheckpoint(
+                "endStoneContextSkipped", grid, currentSim, initialDeficit,
+                "invalidSlot=" + std::to_string(context->requestSlot));
+#endif
+            continue;
+        }
+
+        const auto endStoneCandidates =
+            endStoneReflectorSinkCandidates(
+                grid, context->fuelPos, context->fuelLines);
+        if (!endStoneCandidates.has_value()) {
+#ifndef NDEBUG
+            logDualFuelSinkCheckpoint(
+                "end_stone", context->requestSlot, context->fuelPos, -1,
+                "noCandidates", grid, "reflectorLayoutUnavailable");
+#endif
+            continue;
+        }
+        reflectorCandidates.push_back(
+            {context, *endStoneCandidates});
+        for (const EndStoneReflectorCandidate& candidate :
+             *endStoneCandidates) {
+            throwIfCancelled(cancelRequested);
+            const int sinkIdx = grid.index(
+                candidate.pos.x, candidate.pos.y,
+                candidate.pos.z);
+            if (grid.atIndex(sinkIdx).kind != BlockKind::Empty) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "end_stone", context->requestSlot, candidate.pos,
+                    candidate.faceDirection, "occupied", grid,
+                    "block=" +
+                        std::string(blockKindLabel(
+                            grid.atIndex(sinkIdx).kind)));
+#endif
+                continue;
+            }
+
+            Grid trial = grid;
+            StateVector trialProtected = protectedPositions;
+            trial.atIndex(sinkIdx) = {
+                BlockKind::Sink, endStoneSinkType()};
+            markProtected(
+                trialProtected, trial, candidate.pos);
+            FuelSimulation trialSim = simulateMixedFuel(trial);
+            if (!isPreCompactRunnable(trialSim)) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "end_stone", context->requestSlot, candidate.pos,
+                    candidate.faceDirection, "notRunnable", trial);
+#endif
+                continue;
+            }
+            if (!hasSafeFuelFlux(trial, trialSim)) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "end_stone", context->requestSlot, candidate.pos,
+                    candidate.faceDirection, "unsafeFlux", trial);
+#endif
+                continue;
+            }
+            if (!trialSim.validSinks.at(static_cast<size_t>(sinkIdx))) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "end_stone", context->requestSlot, candidate.pos,
+                    candidate.faceDirection, "invalidSink", trial);
+#endif
+                continue;
+            }
+            if (!matchesSourcePrimingTargets(trial, expectedSourceTargets)) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "end_stone", context->requestSlot, candidate.pos,
+                    candidate.faceDirection, "sourceTargetChangedBeforeConnect",
+                    trial);
+#endif
+                continue;
+            }
+            if (hasInvalidSinks(trial, trialSim)) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "end_stone", context->requestSlot, candidate.pos,
+                    candidate.faceDirection, "invalidSinksAfterPlacement", trial);
+#endif
+                continue;
+            }
+            grid = std::move(trial);
+            currentSim = std::move(trialSim);
+            protectedPositions = std::move(trialProtected);
+#ifndef NDEBUG
+            logDualFuelSinkCheckpoint(
+                "end_stone", context->requestSlot, candidate.pos,
+                candidate.faceDirection, "placed", grid,
+                "cooling=" + std::to_string(currentSim.cooling));
+#endif
+        }
+    }
+
+    currentSim = simulateMixedFuel(grid);
+#ifndef NDEBUG
+    logDualFuelCoolingCheckpoint(
+        "afterEndStone", grid, currentSim, initialDeficit,
+        allowCarobbiite, allowManaDust);
+#endif
+    if (currentSim.cooling >= currentSim.rawHeating) {
+        if (connectPlacedSpecialSinks(
+                grid, currentSim, protectedPositions, {},
+                "afterEndStoneConnections")) {
+#ifndef NDEBUG
+            logDualFuelFallbackCheckpoint(
+                "acceptedAfterEndStone", grid, currentSim,
+                initialDeficit);
+#endif
+            return grid;
+        }
+        return std::nullopt;
+    }
+    if (!allowCarobbiite) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "carobbiiteSkipped", grid, currentSim, initialDeficit,
+            "initialDeficitAtMostEndStoneLimit");
+#endif
+        return std::nullopt;
+    }
+
+    for (const ContextReflectorCandidates& contextCandidates :
+         reflectorCandidates) {
+        throwIfCancelled(cancelRequested);
+        if (contextCandidates.context == nullptr) {
+            continue;
+        }
+        const FuelLayoutContext& context =
+            *contextCandidates.context;
+        const std::vector<CarobbiiteReflectorCandidate>
+            carobbiiteCandidates =
+                carobbiiteReflectorSinkCandidates(
+                    grid, context.fuelLines,
+                    contextCandidates.endStone);
+        if (carobbiiteCandidates.empty()) {
+#ifndef NDEBUG
+            logDualFuelSinkCheckpoint(
+                "carobbiite", context.requestSlot, context.fuelPos, -1,
+                "noCandidates", grid, "reflectorLayoutUnavailable");
+#endif
+        }
+        for (const CarobbiiteReflectorCandidate& candidate :
+             carobbiiteCandidates) {
+            throwIfCancelled(cancelRequested);
+            Grid trial = grid;
+            FuelSimulation trialSim = currentSim;
+            StateVector trialProtected = protectedPositions;
+#ifndef NDEBUG
+            HighHeatPlacementFailureStats placementStats;
+#endif
+            if (!tryPlaceCarobbiiteSink(
+                    trial, trialSim, trialProtected, candidate
+#ifndef NDEBUG
+                    , &placementStats
+#endif
+                    )) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "carobbiite", context.requestSlot, candidate.pos,
+                    candidate.faceDirection, "placementFailed", trial,
+                    "endStonePos=" + posLabel(candidate.endStonePos),
+                    &placementStats);
+#endif
+                continue;
+            }
+            if (!matchesSourcePrimingTargets(trial, expectedSourceTargets)) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "carobbiite", context.requestSlot, candidate.pos,
+                    candidate.faceDirection, "sourceTargetChangedBeforeConnect",
+                    trial, "endStonePos=" + posLabel(candidate.endStonePos));
+#endif
+                continue;
+            }
+            if (hasInvalidSinks(trial, trialSim)) {
+#ifndef NDEBUG
+                logDualFuelSinkCheckpoint(
+                    "carobbiite", context.requestSlot, candidate.pos,
+                    candidate.faceDirection, "invalidSinksAfterPlacement", trial,
+                    "endStonePos=" + posLabel(candidate.endStonePos));
+#endif
+                continue;
+            }
+            grid = std::move(trial);
+            currentSim = std::move(trialSim);
+            protectedPositions =
+                std::move(trialProtected);
+#ifndef NDEBUG
+            logDualFuelSinkCheckpoint(
+                "carobbiite", context.requestSlot, candidate.pos,
+                candidate.faceDirection, "placed", grid,
+                "endStonePos=" + posLabel(candidate.endStonePos) +
+                    " cooling=" + std::to_string(currentSim.cooling));
+#endif
+        }
+    }
+
+    currentSim = simulateMixedFuel(grid);
+#ifndef NDEBUG
+    logDualFuelCoolingCheckpoint(
+        "afterCarobbiite", grid, currentSim, initialDeficit,
+        allowCarobbiite, allowManaDust);
+#endif
+    if (currentSim.cooling >= currentSim.rawHeating) {
+        if (connectPlacedSpecialSinks(
+                grid, currentSim, protectedPositions, {},
+                "afterCarobbiiteConnections")) {
+#ifndef NDEBUG
+            logDualFuelFallbackCheckpoint(
+                "acceptedAfterCarobbiite", grid, currentSim,
+                initialDeficit);
+#endif
+            return grid;
+        }
+        return std::nullopt;
+    }
+    if (!allowManaDust) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "manaDustSkipped", grid, currentSim, initialDeficit,
+            "initialDeficitAtMostCarobbiiteLimit");
+#endif
+        return std::nullopt;
+    }
+
+#ifndef NDEBUG
+    logDualFuelCoolingCheckpoint(
+        "manaDustStart", grid, currentSim, initialDeficit,
+        allowCarobbiite, allowManaDust);
+#endif
+    std::vector<FuelLayoutContext> paddedContexts;
+#ifndef NDEBUG
+    const char* manaPaddingFailure = "unknown";
+#endif
+    std::optional<Grid> padded = padMixedFuelGridForSpecialCooling(
+        grid, request, fuelContexts, paddedContexts
+#ifndef NDEBUG
+        , &manaPaddingFailure
+#endif
+        );
+    if (!padded.has_value()) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "manaDustPaddingFailed", grid, currentSim, initialDeficit,
+            manaPaddingFailure);
+#endif
+        return std::nullopt;
+    }
+
+    Grid manaGrid = std::move(*padded);
+    StateVector manaProtected(
+        static_cast<size_t>(manaGrid.volume()), false);
+    markOccupiedInteriorProtected(manaProtected, manaGrid);
+    const std::vector<Pos> corners =
+        interiorCornerPositions(manaGrid);
+    StateVector forcedValidSinks(
+        static_cast<size_t>(manaGrid.volume()), false);
+    for (const Pos& corner : corners) {
+        if (manaGrid.at(
+                corner.x, corner.y,
+                corner.z).kind != BlockKind::Empty) {
+#ifndef NDEBUG
+            logDualFuelSinkCheckpoint(
+                "mana_dust", -1, corner, -1, "occupied", manaGrid,
+                "block=" + std::string(blockKindLabel(
+                    manaGrid.at(corner.x, corner.y, corner.z).kind)));
+#endif
+            return std::nullopt;
+        }
+        manaGrid.at(corner.x, corner.y, corner.z) = {
+            BlockKind::Sink, manaDustSinkType()};
+        const int idx = manaGrid.index(
+            corner.x, corner.y, corner.z);
+        manaProtected.at(static_cast<size_t>(idx)) = true;
+        forcedValidSinks.at(static_cast<size_t>(idx)) = true;
+#ifndef NDEBUG
+        logDualFuelSinkCheckpoint(
+            "mana_dust", -1, corner, -1, "placed", manaGrid);
+#endif
+    }
+
+    const std::vector<SourcePrimingTarget> paddedSourceTargets =
+        sourcePrimingTargets(manaGrid);
+    const SimulationOptions searchOptions{&forcedValidSinks};
+    FuelSimulation manaSim =
+        simulateMixedFuel(manaGrid, searchOptions);
+    if (!isPreCompactRunnable(manaSim)) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "manaDustInitialRejected", manaGrid, manaSim, initialDeficit,
+            "notRunnable");
+#endif
+        return std::nullopt;
+    }
+    if (!hasSafeFuelFlux(manaGrid, manaSim)) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "manaDustInitialRejected", manaGrid, manaSim, initialDeficit,
+            "unsafeFlux");
+#endif
+        return std::nullopt;
+    }
+    if (!matchesSourcePrimingTargets(manaGrid, paddedSourceTargets)) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "manaDustSourceTargetChanged", manaGrid, manaSim,
+            initialDeficit);
+#endif
+        return std::nullopt;
+    }
+
+    if (!connectPlacedSpecialSinks(
+            manaGrid, manaSim, manaProtected, searchOptions,
+            "afterManaDustConnections")) {
+        return std::nullopt;
+    }
+
+    manaSim = simulateMixedFuel(manaGrid);
+    const bool manaCornersFunctional =
+        hasFunctionalSpecialManaDustCornerSinks(manaGrid, manaSim);
+#ifndef NDEBUG
+    logDualFuelCoolingCheckpoint(
+        "afterManaDust", manaGrid, manaSim, initialDeficit,
+        allowCarobbiite, allowManaDust,
+        "cornersFunctional=" +
+            std::to_string(manaCornersFunctional ? 1 : 0));
+#endif
+    if (!manaCornersFunctional) {
+#ifndef NDEBUG
+        logDualFuelFallbackCheckpoint(
+            "manaDustFinalRejected", manaGrid, manaSim, initialDeficit,
+            "cornersFunctional=" +
+                std::to_string(manaCornersFunctional ? 1 : 0));
+#endif
+        return std::nullopt;
+    }
+#ifndef NDEBUG
+    logDualFuelFallbackCheckpoint(
+        "acceptedAfterManaDust", manaGrid, manaSim, initialDeficit);
+#endif
+    return manaGrid;
+}
+
 std::optional<FinalizeResult> tryConductorBridgeFinalization(
     const Grid& grid, const FuelSimulation& sim, const BuildRequest& request,
     const std::vector<int>& sourceDirections, const std::vector<FuelLineSpec>& fuelLines,
@@ -2052,8 +2905,12 @@ FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& re
                                                const std::vector<int>& sourceDirections,
                                                const std::vector<FuelLineSpec>& fuelLines,
                                                const StateVector* protectedPositions,
-                                               const std::atomic_bool* cancelRequested) {
+                                               const std::atomic_bool* cancelRequested,
+                                               std::optional<MergeableSingleFuelLayout>* mergeableBest,
+                                               const MergeableSingleFuelSearchGoal* mergeableGoal,
+                                               bool* mergeableGoalReached) {
     const std::vector<int> reflectorDirections = lineDirections(fuelLines);
+    const bool mergeableTargetMode = mergeableGoal != nullptr;
     const SupportBlockOptions supportOptions{
         request.selectedModeratorTypeIndices,
         request.selectedReflectorTypeIndices,
@@ -2094,30 +2951,39 @@ FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& re
 #endif
         return {std::nullopt, classifyFinalizationFailure(grid, sim, request)};
     }
+    considerMergeableSingleFuelLayout(
+        grid, request, sourceDirections, fuelLines, mergeableBest,
+        mergeableGoal, mergeableGoalReached);
+    if (mergeableGoalReached != nullptr && *mergeableGoalReached) {
+        return {std::nullopt, FinalizeFailureKind::None};
+    }
 
-    if (isSearchAccepted(grid, sim)) {
+    if (!mergeableTargetMode && isSearchAccepted(grid, sim)) {
         FinalizeResult finalResult = acceptedResultFromImprovedGrid(
             grid, sim, request, sourceDirections, fuelLines, "finalCompactValidationFailed");
         if (finalResult.result.has_value()) {
             return finalResult;
         }
     }
-    if (std::optional<FinalizeResult> specialResult =
+    if (!mergeableTargetMode) {
+        if (std::optional<FinalizeResult> specialResult =
             trySpecialManaDustFinalization(grid, sim, request, sourceDirections, fuelLines,
                                            protectedPositions, cancelRequested)) {
-        return std::move(*specialResult);
+            return std::move(*specialResult);
+        }
     }
-    if (std::optional<FinalizeResult> bridgeResult =
-            tryConductorBridgeFinalization(grid, sim, request, sourceDirections, fuelLines,
-                                           protectedPositions, cancelRequested)) {
-        return std::move(*bridgeResult);
-    }
-
     fillSupportBlocks(grid, &supportOptions, protectedPositions);
     Grid filledBridgeBase = grid;
     pruneInactiveSupport(filledBridgeBase, protectedPositions);
     sim = simulateMixedFuel(filledBridgeBase);
-    if (isSearchAccepted(filledBridgeBase, sim)) {
+    considerMergeableSingleFuelLayout(
+        filledBridgeBase, request, sourceDirections, fuelLines,
+        mergeableBest, mergeableGoal, mergeableGoalReached);
+    if (mergeableGoalReached != nullptr && *mergeableGoalReached) {
+        return {std::nullopt, FinalizeFailureKind::None};
+    }
+    if (!mergeableTargetMode &&
+        isSearchAccepted(filledBridgeBase, sim)) {
         FinalizeResult finalResult = acceptedResultFromImprovedGrid(
             std::move(filledBridgeBase), sim, request, sourceDirections, fuelLines,
             "finalCompactValidationFailed");
@@ -2125,39 +2991,40 @@ FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& re
             return finalResult;
         }
     }
-    if (std::optional<FinalizeResult> highHeatResult =
-            tryHighHeatSingleFuelFinalization(
+    if (!mergeableTargetMode) {
+        if (std::optional<FinalizeResult> highHeatResult =
+                tryHighHeatSingleFuelFinalization(
                 filledBridgeBase, sim, request, sourceDirections, fuelLines,
                 cancelRequested)) {
-        return std::move(*highHeatResult);
-    }
-    if (std::optional<FinalizeResult> specialResult =
+            return std::move(*highHeatResult);
+        }
+        if (std::optional<FinalizeResult> specialResult =
             trySpecialManaDustFinalization(filledBridgeBase, sim, request, sourceDirections, fuelLines,
                                            protectedPositions, cancelRequested)) {
-        return std::move(*specialResult);
+            return std::move(*specialResult);
+        }
     }
-    if (std::optional<FinalizeResult> bridgeResult =
-            tryConductorBridgeFinalization(filledBridgeBase, sim, request, sourceDirections, fuelLines,
-                                           protectedPositions, cancelRequested)) {
-        return std::move(*bridgeResult);
-    }
-
     Grid improved = improveSupportBlocks(std::move(grid), cancelRequested, kDefaultImproveOptions, &supportOptions,
                                          protectedPositions, true);
     pruneInactiveSupport(improved, protectedPositions);
     sim = simulateMixedFuel(improved);
-    if (std::optional<FinalizeResult> specialResult =
+    considerMergeableSingleFuelLayout(
+        improved, request, sourceDirections, fuelLines, mergeableBest,
+        mergeableGoal, mergeableGoalReached);
+    if (mergeableGoalReached != nullptr && *mergeableGoalReached) {
+        return {std::nullopt, FinalizeFailureKind::None};
+    }
+    if (!mergeableTargetMode) {
+        if (std::optional<FinalizeResult> specialResult =
             trySpecialManaDustFinalization(improved, sim, request, sourceDirections, fuelLines,
                                            protectedPositions, cancelRequested)) {
-        return std::move(*specialResult);
-    }
-    if (std::optional<FinalizeResult> bridgeResult =
-            tryConductorBridgeFinalization(improved, sim, request, sourceDirections, fuelLines,
-                                           protectedPositions, cancelRequested)) {
-        return std::move(*bridgeResult);
+            return std::move(*specialResult);
+        }
     }
     if (classifyFinalizationFailure(improved, sim, request) == FinalizeFailureKind::CoolingDeficit) {
         const Grid protectedBaseline = improved;
+        const std::vector<SourcePrimingTarget> expectedSourceTargets =
+            sourcePrimingTargets(improved);
         CoolingExpansionOptions expansionOptions = kCoolingExpansionOptions;
         if (isSpecialManaDustRequest(request)) {
             expansionOptions.handoffCoolingDeficit =
@@ -2165,7 +3032,12 @@ FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& re
         }
         improved = expandCoolingWithPreserver(
             std::move(improved),
-            [protectedPositions, protectedBaseline](Grid& candidate) {
+            [protectedPositions, protectedBaseline,
+             expectedSourceTargets](Grid& candidate) {
+                if (!matchesSourcePrimingTargets(
+                        candidate, expectedSourceTargets)) {
+                    return false;
+                }
                 if (protectedPositions == nullptr ||
                     protectedPositions->size() != static_cast<size_t>(candidate.volume())) {
                     return true;
@@ -2183,20 +3055,36 @@ FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& re
             cancelRequested, expansionOptions);
         pruneInactiveSupport(improved, protectedPositions);
         sim = simulateMixedFuel(improved);
+        considerMergeableSingleFuelLayout(
+            improved, request, sourceDirections, fuelLines,
+            mergeableBest, mergeableGoal, mergeableGoalReached);
+        if (mergeableGoalReached != nullptr && *mergeableGoalReached) {
+            return {std::nullopt, FinalizeFailureKind::None};
+        }
     }
-    if (std::optional<FinalizeResult> specialResult =
+    if (!mergeableTargetMode) {
+        if (std::optional<FinalizeResult> specialResult =
             trySpecialManaDustFinalization(improved, sim, request, sourceDirections, fuelLines,
                                            protectedPositions, cancelRequested)) {
-        return std::move(*specialResult);
+            return std::move(*specialResult);
+        }
     }
-    if (isSpecialManaDustRequest(request) &&
+    if (!mergeableTargetMode &&
+        isSpecialManaDustRequest(request) &&
         hasSpecialManaDustCoolingDeficit(sim) &&
         classifyFinalizationFailure(improved, sim, request) ==
             FinalizeFailureKind::CoolingDeficit) {
         const Grid protectedBaseline = improved;
+        const std::vector<SourcePrimingTarget> expectedSourceTargets =
+            sourcePrimingTargets(improved);
         improved = expandCoolingWithPreserver(
             std::move(improved),
-            [protectedPositions, protectedBaseline](Grid& candidate) {
+            [protectedPositions, protectedBaseline,
+             expectedSourceTargets](Grid& candidate) {
+                if (!matchesSourcePrimingTargets(
+                        candidate, expectedSourceTargets)) {
+                    return false;
+                }
                 if (protectedPositions == nullptr ||
                     protectedPositions->size() != static_cast<size_t>(candidate.volume())) {
                     return true;
@@ -2214,6 +3102,30 @@ FinalizeResult tryFinalizeDirectionalCandidate(Grid grid, const BuildRequest& re
             cancelRequested, kCoolingExpansionOptions);
         pruneInactiveSupport(improved, protectedPositions);
         sim = simulateMixedFuel(improved);
+        considerMergeableSingleFuelLayout(
+            improved, request, sourceDirections, fuelLines,
+            mergeableBest, mergeableGoal, mergeableGoalReached);
+    }
+    if (std::optional<FinalizeResult> bridgeResult =
+            tryConductorBridgeFinalization(
+                improved, sim, request, sourceDirections, fuelLines,
+                protectedPositions, cancelRequested)) {
+        if (!mergeableTargetMode) {
+            return std::move(*bridgeResult);
+        }
+        considerMergeableSingleFuelLayout(
+            bridgeResult->result->grid, request, sourceDirections,
+            fuelLines, mergeableBest, mergeableGoal,
+            mergeableGoalReached);
+        if (mergeableGoalReached != nullptr && *mergeableGoalReached) {
+            return {std::nullopt, FinalizeFailureKind::None};
+        }
+    }
+    if (mergeableGoalReached != nullptr && *mergeableGoalReached) {
+        return {std::nullopt, FinalizeFailureKind::None};
+    }
+    if (mergeableTargetMode) {
+        return {std::nullopt, classifyFinalizationFailure(improved, sim, request)};
     }
     if (!sim.compatible || sim.minClusterMargin < 0 || sim.disconnectedFunctionalBlocks != 0 ||
         !hasSafeFuelFlux(improved, sim)) {
@@ -2251,6 +3163,9 @@ OptimizationResult optimizeSingleFuelDirectionalLayout(const BuildRequest& reque
                 &sourceDirections,
                 nullptr,
                 cancelRequested,
+                nullptr,
+                nullptr,
+                nullptr,
                 1,
             };
             if (std::optional<OptimizationResult> result = searchSingleFuelSkeletonSpecs(search)) {
@@ -2280,6 +3195,47 @@ OptimizationResult optimizeSingleFuelForSlot(const BuildRequest& request, int sl
 
     const std::vector<std::vector<int>> sourceCombos = sourceDirectionCombinations(requiredSourceCountForFuels(single));
     return optimizeSingleFuelDirectionalLayout(single, sourceCombos, cancelRequested);
+}
+
+MergeableSingleFuelLayout optimizeMergeableSingleFuelForSlot(
+    const BuildRequest& request, int slot,
+    const MergeableSingleFuelSearchGoal& goal,
+    const std::atomic_bool* cancelRequested) {
+    BuildRequest single = singleFuelRequestForSlot(request, slot);
+    const Fuel& fuel =
+        fuels().at(static_cast<size_t>(single.fuelIndices.front()));
+    const std::vector<std::vector<int>> sourceCombos =
+        fuel.selfPriming
+            ? std::vector<std::vector<int>>{{}}
+            : sourceDirectionCombinations(
+                  requiredSourceCountForFuels(single));
+    std::optional<MergeableSingleFuelLayout> best;
+    bool goalReached = false;
+
+    for (const Dimension& dim : singleFuelSearchDimensions()) {
+        for (const std::vector<int>& sourceDirections : sourceCombos) {
+            throwIfCancelled(cancelRequested);
+            SingleFuelSkeletonSearch search{
+                &fuel,
+                &single,
+                &dim,
+                &sourceDirections,
+                nullptr,
+                cancelRequested,
+                &best,
+                &goal,
+                &goalReached,
+                1,
+            };
+            searchSingleFuelSkeletonSpecs(search);
+            if (goalReached && best.has_value()) {
+                return std::move(*best);
+            }
+        }
+    }
+
+    throw std::runtime_error(
+        "单燃料子结构无法达到双燃料阶段冷却目标。");
 }
 
 bool heatPriorityLess(int lhsSlot, int rhsSlot, const BuildRequest& request) {
