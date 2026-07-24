@@ -810,28 +810,21 @@ std::optional<OptimizationResult> tryDualCoolingFallback(
 
     Grid manaGrid = std::move(padded->grid);
     StateVector manaProtected = std::move(padded->protectedPositions);
-    FuelSimulation manaSim = simulateMixedFuel(manaGrid);
-    const int manaType = manaDustSinkType();
-    if (manaType < 0) {
+    std::optional<Grid> preplaced =
+        tryPreplaceInsetManaDustFallback(manaGrid);
+    if (!preplaced.has_value()) {
         return std::nullopt;
     }
+    manaGrid = std::move(*preplaced);
+    FuelSimulation manaSim = simulateMixedFuel(manaGrid);
 
-    for (const Pos& corner : interiorCornerPositions(manaGrid)) {
+    for (const Pos& sink : manaDustSinkPositions(manaGrid)) {
         throwIfCancelled(cancelRequested);
-        if (manaGrid.at(corner.x, corner.y, corner.z).kind !=
-            BlockKind::Empty) {
-            return std::nullopt;
-        }
-        manaGrid.at(corner.x, corner.y, corner.z) = {
-            BlockKind::Sink,
-            manaType,
-        };
-        markProtected(manaProtected, manaGrid, corner);
-        manaSim = simulateMixedFuel(manaGrid);
+        markProtected(manaProtected, manaGrid, sink);
         if (!manaSim.validSinks.at(static_cast<size_t>(
-                manaGrid.index(corner.x, corner.y, corner.z))) ||
+                manaGrid.index(sink.x, sink.y, sink.z))) ||
             !tryConnectSinkToHeatingCluster(
-                manaGrid, manaSim, corner, manaProtected,
+                manaGrid, manaSim, sink, manaProtected,
                 cancelRequested)) {
             return std::nullopt;
         }
@@ -843,7 +836,7 @@ std::optional<OptimizationResult> tryDualCoolingFallback(
                     placedEndStone, threshold, true);
 #endif
     if (!isSearchAccepted(manaGrid, manaSim) ||
-        !hasFunctionalManaDustCorners(manaGrid, manaSim)) {
+        !hasEightFunctionalManaDustSinks(manaGrid, manaSim)) {
         return std::nullopt;
     }
     return acceptedDualResult(

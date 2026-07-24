@@ -21,15 +21,18 @@ qt_add_executable(fission_reactor
     WIN32
     src/main.cpp
     src/Data.cpp
+    src/FuelSpecialCases.h
     src/FuelPlacementPrefilter.cpp
     src/FuelPlacementPrefilter.h
     src/Grid.cpp
     src/MainWindow.cpp
     src/MainWindow.h
+    src/NeutronRules.h
     src/Optimizer.cpp
     src/OptimizerCommon.cpp
     src/OptimizerCooling.cpp
     src/OptimizerDetail.h
+    src/OptimizerDual.cpp
     src/OptimizerIrradiator.cpp
     src/OptimizerMerge.cpp
     src/OptimizerSingle.cpp

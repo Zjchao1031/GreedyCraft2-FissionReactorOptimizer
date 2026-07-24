@@ -3,6 +3,7 @@
 #include "Perf.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <deque>
 #include <limits>
@@ -417,6 +418,85 @@ int manaDustSinkType() {
 bool isManaDustSink(const Block& block) {
     const int type = manaDustSinkType();
     return type >= 0 && block.kind == BlockKind::Sink && block.type == type;
+}
+
+std::vector<Pos> manaDustSinkPositions(const Grid& grid) {
+    std::vector<Pos> positions;
+    positions.reserve(8);
+    for (const Pos& pos : grid.interiorPositions()) {
+        if (isManaDustSink(grid.at(pos.x, pos.y, pos.z))) {
+            positions.push_back(pos);
+        }
+    }
+    return positions;
+}
+
+bool hasEightFunctionalManaDustSinks(
+    const Grid& grid, const FuelSimulation& sim) {
+    if (sim.validSinks.size() != static_cast<size_t>(grid.volume()) ||
+        sim.heatingClusterBlocks.size() !=
+            static_cast<size_t>(grid.volume())) {
+        return false;
+    }
+    const std::vector<Pos> sinks = manaDustSinkPositions(grid);
+    if (sinks.size() != 8) {
+        return false;
+    }
+    for (const Pos& sink : sinks) {
+        const int idx = grid.index(sink.x, sink.y, sink.z);
+        if (!sim.validSinks.at(static_cast<size_t>(idx)) ||
+            !sim.heatingClusterBlocks.at(static_cast<size_t>(idx))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<Grid> tryPreplaceInsetManaDustFallback(
+    Grid grid, std::string* failure) {
+    const auto fail = [failure](std::string reason) {
+        if (failure != nullptr) {
+            *failure = std::move(reason);
+        }
+        return std::optional<Grid>{};
+    };
+
+    const int manaType = manaDustSinkType();
+    if (manaType < 0) {
+        return fail("sinkTypeMissing sourceName=mana_dust");
+    }
+    if (grid.internalA() < 4 || grid.internalB() < 4 ||
+        grid.internalC() < 4) {
+        std::ostringstream os;
+        os << "gridTooSmall internal=" << grid.internalA() << "x"
+           << grid.internalB() << "x" << grid.internalC();
+        return fail(os.str());
+    }
+
+    const std::array<int, 2> xs = {2, grid.internalA() - 1};
+    const std::array<int, 2> ys = {2, grid.internalB() - 1};
+    const std::array<int, 2> zs = {2, grid.internalC() - 1};
+    for (int z : zs) {
+        for (int y : ys) {
+            for (int x : xs) {
+                const Block& block = grid.at(x, y, z);
+                if (block.kind != BlockKind::Empty) {
+                    std::ostringstream os;
+                    os << "inset=(" << x << "," << y << "," << z
+                       << ") occupied=" << static_cast<int>(block.kind);
+                    return fail(os.str());
+                }
+            }
+        }
+    }
+    for (int z : zs) {
+        for (int y : ys) {
+            for (int x : xs) {
+                grid.at(x, y, z) = {BlockKind::Sink, manaType};
+            }
+        }
+    }
+    return grid;
 }
 
 bool isInteriorCorner(const Grid& grid, const Pos& pos) {

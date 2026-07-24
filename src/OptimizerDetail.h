@@ -107,6 +107,16 @@ struct FinalizeResult {
     FinalizeFailureKind failure = FinalizeFailureKind::None;
 };
 
+struct ConductorBridgeResult {
+    Grid grid;
+    FuelSimulation sim;
+    bool attempted = false;
+    bool success = false;
+    int clusterCount = 0;
+    int conductorsAdded = 0;
+    std::string reason;
+};
+
 struct Direction {
     int dx = 0;
     int dy = 0;
@@ -142,6 +152,11 @@ RuleContext optimisticRuleContext(const Grid& grid, StateVector& validSinks, Sta
 bool optimisticSinkValidAt(Grid& grid, const Pos& pos, const RuleContext& context);
 int manaDustSinkType();
 bool isManaDustSink(const Block& block);
+std::vector<Pos> manaDustSinkPositions(const Grid& grid);
+bool hasEightFunctionalManaDustSinks(
+    const Grid& grid, const FuelSimulation& sim);
+std::optional<Grid> tryPreplaceInsetManaDustFallback(
+    Grid grid, std::string* failure = nullptr);
 bool isInteriorCorner(const Grid& grid, const Pos& pos);
 bool cornerSinkConnectsToInteriorCluster(const Grid& grid, const Pos& corner);
 void removeUnclusteredCornerManaDustSinks(Grid& grid);
@@ -158,6 +173,11 @@ bool hasNoEmptyInteriorPlane(const Grid& grid);
 Grid compactEmptyInteriorPlanes(Grid grid);
 bool isSupportMutable(const Block& block);
 bool isRequiredSupportBlock(const Grid& grid, const FuelSimulation& sim, int idx);
+bool canAttemptConductorBridge(const Grid& grid, const FuelSimulation& sim);
+ConductorBridgeResult connectHeatingClustersWithConductors(
+    Grid grid, const FuelSimulation& initialSim,
+    const StateVector* protectedPositions,
+    const std::atomic_bool* cancelRequested);
 int countFunctionalIrradiators(const FuelSimulation& sim);
 int countUsefulBlocks(const Grid& grid);
 std::vector<int> uniqueFuelIndicesInRequest(const BuildRequest& request);
@@ -196,6 +216,7 @@ Pos offset(const Pos& pos, const Direction& dir, int distance);
 Pos sourcePositionForDirection(const Grid& grid, const Pos& fuelPos, const Direction& dir);
 std::vector<std::vector<int>> sourceDirectionCombinations(int sourceCount);
 std::vector<Dimension> singleFuelSearchDimensions();
+bool fuelLineWithinReflectorReach(const FuelLineSpec& line);
 std::vector<FuelLineSpec> singleFuelLineOptions(const Fuel& fuel, const BuildRequest& request,
                                                 const std::vector<int>& sourceDirections,
                                                 int direction);

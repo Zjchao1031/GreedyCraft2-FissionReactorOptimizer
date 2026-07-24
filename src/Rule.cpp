@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <mutex>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -279,6 +280,8 @@ std::uint64_t topologyKey(const Grid& grid) {
 
 const RuleTopology& ruleTopologyFor(const Grid& grid) {
     static std::unordered_map<std::uint64_t, RuleTopology> cache;
+    static std::mutex cacheMutex;
+    const std::lock_guard<std::mutex> lock(cacheMutex);
     const std::uint64_t key = topologyKey(grid);
     if (auto it = cache.find(key); it != cache.end()) {
         return it->second;

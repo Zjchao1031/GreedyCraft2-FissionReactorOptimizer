@@ -2,6 +2,8 @@
 
 #include "Data.h"
 
+#include <cstddef>
+
 namespace ncfr {
 
 inline constexpr double kEndStoneFallbackFuelHeatThreshold = 2190.0;
@@ -17,10 +19,29 @@ inline constexpr long long kManaDustFallbackCoolingCapacity = 640;
 inline constexpr long long kCombinedHighHeatFallbackCoolingCapacity =
     kEndStoneCarobbiiteFallbackCoolingCapacity +
     kManaDustFallbackCoolingCapacity;
-inline constexpr long long kDualFuelStageCoolingTarget = 2190;
-inline constexpr long long kDualFuelEndStoneDeficitLimit = 650;
-inline constexpr long long kDualFuelCarobbiiteDeficitLimit = 1770;
-inline constexpr long long kDualFuelManaDustDeficitLimit = 2410;
+inline constexpr long long kMixedFuelStageCoolingTarget = 2190;
+
+struct MixedFuelSpecialCoolingLimits {
+    long long endStoneDeficitLimit = 0;
+    long long carobbiiteDeficitLimit = 0;
+    long long manaDustDeficitLimit = 0;
+};
+
+inline MixedFuelSpecialCoolingLimits mixedFuelSpecialCoolingLimits(
+    std::size_t fuelContextCount) {
+    const long long fuelCount =
+        static_cast<long long>(fuelContextCount);
+    const long long endStoneCapacity =
+        fuelCount * kEndStoneFallbackCoolingCapacity;
+    const long long carobbiiteCapacity =
+        endStoneCapacity +
+        fuelCount * kCarobbiiteFallbackCoolingCapacity;
+    return {
+        endStoneCapacity,
+        carobbiiteCapacity,
+        carobbiiteCapacity + kManaDustFallbackCoolingCapacity,
+    };
+}
 
 inline bool usesEndStoneOnlyReflectorCooling(const Fuel& fuel) {
     return fuel.heat > kEndStoneFallbackFuelHeatThreshold &&
