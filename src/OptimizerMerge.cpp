@@ -1,5 +1,12 @@
-#include "OptimizerDetail.h"
+#include "OptimizerMerge.h"
 
+#include "OptimizerCommon.h"
+#include "OptimizerConductorBridge.h"
+#include "OptimizerCooling.h"
+#include "OptimizerDiagnostics.h"
+#include "OptimizerDirectional.h"
+#include "OptimizerSingle.h"
+#include "OptimizerSpecialCooling.h"
 #include "FuelSpecialCases.h"
 #include "Perf.h"
 

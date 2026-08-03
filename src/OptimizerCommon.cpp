@@ -1,6 +1,8 @@
-#include "OptimizerDetail.h"
+#include "OptimizerCommon.h"
 
+#include "OptimizerDiagnostics.h"
 #include "Perf.h"
+#include "ReactorAssembly.h"
 
 #include <algorithm>
 #include <array>
@@ -803,8 +805,6 @@ bool hasRequiredIrradiator(const Grid& grid, const BuildRequest& request,
     return irradiatorBlocks == 0 && functionalIrradiators == 0;
 }
 
-bool hasRequiredBoundaryParts(const Grid& grid, const BuildRequest& request);
-
 bool isFinalReactorValidInternal(const Grid& grid, const BuildRequest& request,
                                  const FuelSimulation& sim) {
     const bool sizeValid =
@@ -815,7 +815,7 @@ bool isFinalReactorValidInternal(const Grid& grid, const BuildRequest& request,
            hasRequiredFuelCells(grid, request) &&
            hasRequiredIrradiator(grid, request, sim) &&
            hasRequiredSources(grid, request) &&
-           hasRequiredBoundaryParts(grid, request) &&
+           hasRequiredBoundaryParts(grid, request.fuelIndices) &&
            isSafeOperatingSimulation(grid, sim);
 }
 
@@ -1003,10 +1003,6 @@ bool isRequiredSupportBlock(const Grid& grid, const FuelSimulation& sim, int idx
     }
 }
 
-int countFunctionalIrradiators(const FuelSimulation& sim) {
-    return static_cast<int>(std::count(sim.functionalIrradiators.begin(), sim.functionalIrradiators.end(), true));
-}
-
 bool removeInvalidSinks(Grid& grid, const FuelSimulation& sim) {
     bool removed = false;
     for (const Pos& pos : grid.interiorPositions()) {
@@ -1018,178 +1014,6 @@ bool removeInvalidSinks(Grid& grid, const FuelSimulation& sim) {
         }
     }
     return removed;
-}
-
-int countUsefulBlocks(const Grid& grid) {
-    int count = 0;
-    for (const Pos& pos : grid.interiorPositions()) {
-        if (isFunctionalInterior(grid.at(pos.x, pos.y, pos.z).kind)) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-std::vector<int> uniqueFuelIndicesInRequest(const BuildRequest& request) {
-    std::vector<int> unique;
-    unique.reserve(request.fuelIndices.size());
-    for (int fuelIndex : request.fuelIndices) {
-        if (std::find(unique.begin(), unique.end(), fuelIndex) == unique.end()) {
-            unique.push_back(fuelIndex);
-        }
-    }
-    return unique;
-}
-
-std::vector<Pos> fuelCellPortPositions(const Grid& grid) {
-    std::vector<Pos> positions;
-    positions.reserve(static_cast<size_t>(grid.volume()));
-    auto appendIfCasing = [&](int x, int y, int z) {
-        if (grid.isBoundary(x, y, z) && grid.at(x, y, z).kind == BlockKind::Casing) {
-            positions.push_back({x, y, z});
-        }
-    };
-
-    for (int z = 1; z < grid.depth() - 1; ++z) {
-        for (int y = 1; y < grid.height() - 1; ++y) {
-            appendIfCasing(0, y, z);
-            appendIfCasing(grid.width() - 1, y, z);
-        }
-    }
-    for (int z = 1; z < grid.depth() - 1; ++z) {
-        for (int x = 1; x < grid.width() - 1; ++x) {
-            appendIfCasing(x, 0, z);
-            appendIfCasing(x, grid.height() - 1, z);
-        }
-    }
-    for (int y = 1; y < grid.height() - 1; ++y) {
-        for (int x = 1; x < grid.width() - 1; ++x) {
-            appendIfCasing(x, y, 0);
-            appendIfCasing(x, y, grid.depth() - 1);
-        }
-    }
-    return positions;
-}
-
-void addFuelCellPorts(Grid& grid, const BuildRequest& request) {
-    const std::vector<int> uniqueFuelIndices = uniqueFuelIndicesInRequest(request);
-    const std::vector<Pos> portPositions = fuelCellPortPositions(grid);
-    if (portPositions.size() < uniqueFuelIndices.size() * 2) {
-        throw std::runtime_error("外壳空间不足，无法为每种燃料放置输入/输出燃料单元端口。");
-    }
-
-    size_t positionIndex = 0;
-    for (int fuelIndex : uniqueFuelIndices) {
-        const Pos inputPos = portPositions.at(positionIndex++);
-        grid.at(inputPos.x, inputPos.y, inputPos.z) =
-            {BlockKind::CellPort, fuelCellPortType(fuelIndex, FuelCellPortRole::Input)};
-
-        const Pos outputPos = portPositions.at(positionIndex++);
-        grid.at(outputPos.x, outputPos.y, outputPos.z) =
-            {BlockKind::CellPort, fuelCellPortType(fuelIndex, FuelCellPortRole::Output)};
-    }
-}
-
-void addIrradiatorPort(Grid& grid) {
-    bool hasIrradiator = false;
-    int portCount = 0;
-    for (int z = 0; z < grid.depth(); ++z) {
-        for (int y = 0; y < grid.height(); ++y) {
-            for (int x = 0; x < grid.width(); ++x) {
-                const Block& block = grid.at(x, y, z);
-                hasIrradiator = hasIrradiator || block.kind == BlockKind::Irradiator;
-                if (block.kind == BlockKind::IrradiatorPort) {
-                    ++portCount;
-                }
-            }
-        }
-    }
-    if (!hasIrradiator || portCount >= 2) {
-        return;
-    }
-
-    for (const Pos& pos : fuelCellPortPositions(grid)) {
-        if (portCount >= 2) {
-            return;
-        }
-        const FuelCellPortRole role = portCount == 0 ? FuelCellPortRole::Input : FuelCellPortRole::Output;
-        grid.at(pos.x, pos.y, pos.z) = {BlockKind::IrradiatorPort, irradiatorPortType(role)};
-        ++portCount;
-    }
-    throw std::runtime_error("外壳空间不足，无法放置输入/输出辐照器端口。");
-}
-
-bool hasRequiredBoundaryParts(const Grid& grid, const BuildRequest& request) {
-    int controllers = 0;
-    int inputVents = 0;
-    int outputVents = 0;
-    bool hasIrradiator = false;
-    std::vector<bool> fuelInputs(fuels().size(), false);
-    std::vector<bool> fuelOutputs(fuels().size(), false);
-    bool irradiatorInput = false;
-    bool irradiatorOutput = false;
-
-    for (int z = 0; z < grid.depth(); ++z) {
-        for (int y = 0; y < grid.height(); ++y) {
-            for (int x = 0; x < grid.width(); ++x) {
-                const Block& block = grid.at(x, y, z);
-                if (grid.isInterior(x, y, z)) {
-                    hasIrradiator = hasIrradiator || block.kind == BlockKind::Irradiator;
-                    continue;
-                }
-                switch (block.kind) {
-                case BlockKind::Controller:
-                    ++controllers;
-                    break;
-                case BlockKind::VentIn:
-                    ++inputVents;
-                    break;
-                case BlockKind::VentOut:
-                    ++outputVents;
-                    break;
-                case BlockKind::CellPort: {
-                    const int fuelIndex = fuelCellPortFuelIndex(block.type);
-                    if (fuelIndex >= 0 && fuelIndex < static_cast<int>(fuels().size())) {
-                        if (fuelCellPortRole(block.type) == FuelCellPortRole::Input) {
-                            fuelInputs.at(static_cast<size_t>(fuelIndex)) = true;
-                        } else {
-                            fuelOutputs.at(static_cast<size_t>(fuelIndex)) = true;
-                        }
-                    }
-                    break;
-                }
-                case BlockKind::IrradiatorPort:
-                    if (irradiatorPortRole(block.type) == FuelCellPortRole::Input) {
-                        irradiatorInput = true;
-                    } else {
-                        irradiatorOutput = true;
-                    }
-                    break;
-                default:
-                    break;
-                }
-            }
-        }
-    }
-
-    if (controllers != 1 || inputVents != 1 || outputVents != 1) {
-        return false;
-    }
-    for (int fuelIndex : uniqueFuelIndicesInRequest(request)) {
-        if (!fuelInputs.at(static_cast<size_t>(fuelIndex)) ||
-            !fuelOutputs.at(static_cast<size_t>(fuelIndex))) {
-            return false;
-        }
-    }
-    return !hasIrradiator || (irradiatorInput && irradiatorOutput);
-}
-
-double totalIrradiatorFlux(const FuelSimulation& sim) {
-    double total = 0.0;
-    for (double flux : sim.irradiatorFluxByIndex) {
-        total += flux;
-    }
-    return total;
 }
 
 CandidateScore scoreSimulation(const Grid& grid, const FuelSimulation& sim) {
@@ -1414,7 +1238,7 @@ OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, 
         finalSim = simulateMixedFuel(finalGrid);
     }
 
-    addFuelCellPorts(finalGrid, request);
+    addFuelCellPorts(finalGrid, request.fuelIndices);
     addIrradiatorPort(finalGrid);
     finalSim = simulateMixedFuel(finalGrid);
     const bool finalValid =
@@ -1428,7 +1252,8 @@ OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, 
     const bool fuelCellsValid = hasRequiredFuelCells(finalGrid, request);
     const bool irradiatorValid =
         hasRequiredIrradiator(finalGrid, request, finalSim);
-    const bool boundaryPartsValid = hasRequiredBoundaryParts(finalGrid, request);
+    const bool boundaryPartsValid =
+        hasRequiredBoundaryParts(finalGrid, request.fuelIndices);
     const bool noEmptyPlane = hasNoEmptyInteriorPlane(finalGrid);
     const bool searchAccepted = isSearchOperatingSimulation(finalGrid, finalSim);
     const bool sinksValid = !hasInvalidSinks(finalGrid, finalSim);
@@ -1473,11 +1298,7 @@ OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, 
     }
 
     OptimizationResult result(std::move(finalGrid), request);
-    result.minCoolingMargin = finalSim.minClusterMargin;
-    result.usefulBlocks = countUsefulBlocks(result.grid);
-    result.disconnectedFunctionalBlocks = finalSim.disconnectedFunctionalBlocks;
-    result.functionalIrradiators = countFunctionalIrradiators(finalSim);
-    result.irradiatorFlux = totalIrradiatorFlux(finalSim);
+    updateResultMetrics(result, finalSim);
     return result;
 }
 
@@ -1518,6 +1339,28 @@ FinalizeFailureKind finalizeFailureFromFuelRelation(const FuelRelationPrefilterR
         return FinalizeFailureKind::Structural;
     }
     return FinalizeFailureKind::Structural;
+}
+
+void pruneInactiveSupport(Grid& grid, const StateVector* protectedPositions) {
+    FuelSimulation sim = simulateMixedFuel(grid);
+    for (const Pos& pos : grid.interiorPositions()) {
+        const int idx = grid.index(pos.x, pos.y, pos.z);
+        if (protectedPositions != nullptr &&
+            static_cast<size_t>(idx) < protectedPositions->size() &&
+            protectedPositions->at(static_cast<size_t>(idx))) {
+            continue;
+        }
+        Block& block = grid.atIndex(idx);
+        if (block.kind == BlockKind::Sink &&
+            !sim.validSinks.at(static_cast<size_t>(idx))) {
+            block = {BlockKind::Empty, -1};
+            continue;
+        }
+        if (block.kind != BlockKind::Empty && isSupportMutable(block) &&
+            !isRequiredSupportBlock(grid, sim, idx)) {
+            block = {BlockKind::Empty, -1};
+        }
+    }
 }
 
 } // namespace ncfr::optimizer_detail

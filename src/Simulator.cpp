@@ -2,6 +2,7 @@
 
 #include "Perf.h"
 #include "NeutronRules.h"
+#include "NeutronLineTraversal.h"
 #include "Rule.h"
 
 #include <algorithm>
@@ -13,11 +14,6 @@ namespace ncfr {
 namespace {
 
 constexpr int kFissionMaxSize = 24;
-
-struct ShieldLineUse {
-    int index = -1;
-    double innerFlux = 0.0;
-};
 
 std::vector<Pos> allPositions(const Grid& grid) {
     std::vector<Pos> positions;
@@ -96,103 +92,59 @@ void markActiveModeratorEndpoints(const std::vector<int>& moderators, bool endpo
     }
 }
 
-void markCompletedLine(const std::vector<int>& moderators, const std::vector<ShieldLineUse>& shields,
+void markCompletedLine(const std::vector<int>& moderators,
+                       const std::vector<NeutronShieldFlux>& shields,
                        bool endpointSupportsActiveModerator, double shieldFlux, StateVector& usedModerators,
                        std::vector<double>& shieldFluxByIndex) {
     markActiveModeratorEndpoints(moderators, endpointSupportsActiveModerator, usedModerators);
-    for (const ShieldLineUse& shield : shields) {
+    for (const NeutronShieldFlux& shield : shields) {
         shieldFluxByIndex.at(static_cast<size_t>(shield.index)) += std::max(0.0, shieldFlux);
     }
 }
 
-void markCompletedFluxSinkLine(const std::vector<int>& moderators, const std::vector<ShieldLineUse>& shields,
+void markCompletedFluxSinkLine(const std::vector<int>& moderators,
+                               const std::vector<NeutronShieldFlux>& shields,
                                StateVector& usedModerators, std::vector<double>& shieldFluxByIndex) {
     markActiveModeratorEndpoints(moderators, false, usedModerators);
-    for (const ShieldLineUse& shield : shields) {
-        shieldFluxByIndex.at(static_cast<size_t>(shield.index)) += std::max(0.0, shield.innerFlux);
+    for (const NeutronShieldFlux& shield : shields) {
+        shieldFluxByIndex.at(static_cast<size_t>(shield.index)) += std::max(0.0, shield.incomingFlux);
     }
 }
 
-void traceLine(const Grid& grid, const Fuel& fuel, const Pos& from, const int dir[3],
+void traceLine(const Grid& grid, const Fuel& fuel, const Pos& from,
+               const Pos& direction,
                std::vector<double>& flux, std::vector<int>& heatLinks, StateVector& usedModerators,
                StateVector& usedReflectors, std::vector<double>& shieldFluxByIndex,
                std::vector<double>& irradiatorFluxByIndex) {
     NCFR_PERF_COUNT(traceLineCalls);
     const int fromIndex = grid.index(from.x, from.y, from.z);
-    Pos next{from.x + dir[0], from.y + dir[1], from.z + dir[2]};
-    if (!grid.inBounds(next.x, next.y, next.z)) {
-        return;
-    }
-
-    const Block& adjacent = grid.at(next.x, next.y, next.z);
-    if (fuel.intrinsicFlux > 0.0) {
-        if (adjacent.kind == BlockKind::FuelCell) {
-            const int toIndex = grid.index(next.x, next.y, next.z);
-            flux.at(static_cast<size_t>(toIndex)) += fuel.intrinsicFlux;
-            ++heatLinks.at(static_cast<size_t>(fromIndex));
-            ++heatLinks.at(static_cast<size_t>(toIndex));
-            return;
-        }
-        if (adjacent.kind == BlockKind::Irradiator && adjacent.type >= 0) {
-            const int toIndex = grid.index(next.x, next.y, next.z);
-            irradiatorFluxByIndex.at(static_cast<size_t>(toIndex)) += fuel.intrinsicFlux;
-            ++heatLinks.at(static_cast<size_t>(fromIndex));
-            return;
-        }
-    }
-
-    double lineFlux = fuel.intrinsicFlux;
-    int moderatorCount = 0;
-    std::vector<int> lineModerators;
-    std::vector<ShieldLineUse> lineShields;
-    Pos cur = next;
-    for (int step = 1; step <= kNeutronReach; ++step) {
-        if (!grid.inBounds(cur.x, cur.y, cur.z)) {
-            return;
-        }
-        const int curIndex = grid.index(cur.x, cur.y, cur.z);
-        const Block& block = grid.atIndex(curIndex);
-        if (block.kind == BlockKind::Moderator && block.type >= 0) {
-            const auto& moderator = moderatorTypes().at(static_cast<size_t>(block.type));
-            lineFlux += moderator.fluxFactor;
-            ++moderatorCount;
-            lineModerators.push_back(curIndex);
-        } else if (block.kind == BlockKind::Shield && block.type >= 0) {
-            lineShields.push_back({curIndex, lineFlux});
-        } else {
-            return;
-        }
-
-        Pos target{cur.x + dir[0], cur.y + dir[1], cur.z + dir[2]};
-        if (!grid.inBounds(target.x, target.y, target.z)) {
-            return;
-        }
-        const int targetIndex = grid.index(target.x, target.y, target.z);
-        const Block& targetBlock = grid.atIndex(targetIndex);
-        if (targetBlock.kind == BlockKind::FuelCell) {
-            flux.at(static_cast<size_t>(targetIndex)) += lineFlux;
-            ++heatLinks.at(static_cast<size_t>(fromIndex));
-            ++heatLinks.at(static_cast<size_t>(targetIndex));
-            markCompletedLine(lineModerators, lineShields, true, lineFlux, usedModerators, shieldFluxByIndex);
-            return;
-        }
-        if (targetBlock.kind == BlockKind::Irradiator && targetBlock.type >= 0) {
-            irradiatorFluxByIndex.at(static_cast<size_t>(targetIndex)) += lineFlux;
-            ++heatLinks.at(static_cast<size_t>(fromIndex));
-            markCompletedFluxSinkLine(lineModerators, lineShields, usedModerators, shieldFluxByIndex);
-            return;
-        }
-        if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 &&
-            step <= kMaxReflectorLineModerators) {
-            const auto& reflector = reflectorTypes().at(static_cast<size_t>(targetBlock.type));
-            usedReflectors.at(static_cast<size_t>(targetIndex)) = true;
-            const double reflectedFlux = std::floor(2.0 * lineFlux * reflector.reflectivity);
-            flux.at(static_cast<size_t>(fromIndex)) += reflectedFlux;
-            ++heatLinks.at(static_cast<size_t>(fromIndex));
-            markCompletedLine(lineModerators, lineShields, false, reflectedFlux, usedModerators, shieldFluxByIndex);
-            return;
-        }
-        cur = target;
+    NeutronLineActivity activity;
+    const NeutronLineResult result =
+        traceNeutronLine(grid, fuel, from, direction, &activity);
+    switch (result.endpoint) {
+    case NeutronLineEndpoint::FuelCell:
+        flux.at(static_cast<size_t>(result.targetIndex)) += result.flux;
+        ++heatLinks.at(static_cast<size_t>(fromIndex));
+        ++heatLinks.at(static_cast<size_t>(result.targetIndex));
+        markCompletedLine(activity.moderatorIndices, activity.shields, true,
+                          result.flux, usedModerators, shieldFluxByIndex);
+        break;
+    case NeutronLineEndpoint::Irradiator:
+        irradiatorFluxByIndex.at(static_cast<size_t>(result.targetIndex)) +=
+            result.flux;
+        ++heatLinks.at(static_cast<size_t>(fromIndex));
+        markCompletedFluxSinkLine(activity.moderatorIndices, activity.shields,
+                                  usedModerators, shieldFluxByIndex);
+        break;
+    case NeutronLineEndpoint::Reflector:
+        usedReflectors.at(static_cast<size_t>(result.targetIndex)) = true;
+        flux.at(static_cast<size_t>(fromIndex)) += result.flux;
+        ++heatLinks.at(static_cast<size_t>(fromIndex));
+        markCompletedLine(activity.moderatorIndices, activity.shields, false,
+                          result.flux, usedModerators, shieldFluxByIndex);
+        break;
+    case NeutronLineEndpoint::None:
+        break;
     }
 }
 
@@ -332,10 +284,6 @@ FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex, c
     StateVector running = seeded;
     std::vector<double> shieldFluxByIndex(volume, 0.0);
     std::vector<double> irradiatorFluxByIndex(volume, 0.0);
-    static constexpr int dirs[6][3] = {
-        {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}
-    };
-
     for (int iteration = 0; iteration < 16; ++iteration) {
         NCFR_PERF_COUNT(simulateFuelIterations);
         std::fill(result.fluxByIndex.begin(), result.fluxByIndex.end(), 0.0);
@@ -351,8 +299,8 @@ FuelSimulation simulateFuelImpl(const Grid& grid, FuelForIndex&& fuelForIndex, c
             }
             const Pos from = indexToPos(grid, idx);
             const Fuel& fuel = fuelForIndex(idx);
-            for (const auto& dir : dirs) {
-                traceLine(grid, fuel, from, dir, result.fluxByIndex, result.heatLinksByIndex,
+            for (const Pos& direction : kNeutronLineDirections) {
+                traceLine(grid, fuel, from, direction, result.fluxByIndex, result.heatLinksByIndex,
                           result.activeModerators, result.activeReflectors, shieldFluxByIndex,
                           irradiatorFluxByIndex);
             }

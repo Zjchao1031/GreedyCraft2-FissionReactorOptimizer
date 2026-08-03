@@ -2,7 +2,9 @@
 
 #include "Data.h"
 #include "FuelSpecialCases.h"
+#include "ReactorAssembly.h"
 #include "ReactorGridWidget.h"
+#include "ReactorMetrics.h"
 #include "Simulator.h"
 
 #include <QApplication>
@@ -314,114 +316,6 @@ QStringList fuelFamilies() {
     return families;
 }
 
-int countFunctionalIrradiators(const ncfr::FuelSimulation& sim) {
-    return static_cast<int>(std::count(sim.functionalIrradiators.begin(), sim.functionalIrradiators.end(), true));
-}
-
-double totalIrradiatorFlux(const ncfr::FuelSimulation& sim) {
-    double total = 0.0;
-    for (double flux : sim.irradiatorFluxByIndex) {
-        total += flux;
-    }
-    return total;
-}
-
-int countUsefulBlocks(const ncfr::Grid& grid) {
-    int count = 0;
-    for (const ncfr::Pos& pos : grid.interiorPositions()) {
-        if (ncfr::isFunctionalInterior(grid.at(pos.x, pos.y, pos.z).kind)) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-std::vector<int> fuelIndicesInGrid(const ncfr::Grid& grid) {
-    std::vector<int> indices;
-    for (const ncfr::Pos& pos : grid.interiorPositions()) {
-        const ncfr::Block& block = grid.at(pos.x, pos.y, pos.z);
-        if (block.kind == ncfr::BlockKind::FuelCell && block.type >= 0) {
-            indices.push_back(block.type);
-        }
-    }
-    return indices;
-}
-
-std::vector<int> uniqueFuelIndices(const std::vector<int>& indices) {
-    std::vector<int> unique;
-    unique.reserve(indices.size());
-    for (int fuelIndex : indices) {
-        if (std::find(unique.begin(), unique.end(), fuelIndex) == unique.end()) {
-            unique.push_back(fuelIndex);
-        }
-    }
-    return unique;
-}
-
-std::vector<ncfr::Pos> fuelCellPortPositions(const ncfr::Grid& grid) {
-    std::vector<ncfr::Pos> positions;
-    positions.reserve(static_cast<size_t>(grid.volume()));
-    auto appendIfCasing = [&](int x, int y, int z) {
-        if (grid.isBoundary(x, y, z) && grid.at(x, y, z).kind == ncfr::BlockKind::Casing) {
-            positions.push_back({x, y, z});
-        }
-    };
-
-    for (int z = 1; z < grid.depth() - 1; ++z) {
-        for (int y = 1; y < grid.height() - 1; ++y) {
-            appendIfCasing(0, y, z);
-            appendIfCasing(grid.width() - 1, y, z);
-        }
-    }
-    for (int z = 1; z < grid.depth() - 1; ++z) {
-        for (int x = 1; x < grid.width() - 1; ++x) {
-            appendIfCasing(x, 0, z);
-            appendIfCasing(x, grid.height() - 1, z);
-        }
-    }
-    for (int y = 1; y < grid.height() - 1; ++y) {
-        for (int x = 1; x < grid.width() - 1; ++x) {
-            appendIfCasing(x, y, 0);
-            appendIfCasing(x, y, grid.depth() - 1);
-        }
-    }
-    return positions;
-}
-
-void clearFuelCellPorts(ncfr::Grid& grid) {
-    for (int z = 0; z < grid.depth(); ++z) {
-        for (int y = 0; y < grid.height(); ++y) {
-            for (int x = 0; x < grid.width(); ++x) {
-                ncfr::Block& block = grid.at(x, y, z);
-                if (grid.isBoundary(x, y, z) && block.kind == ncfr::BlockKind::CellPort) {
-                    block = {ncfr::BlockKind::Casing, -1};
-                }
-            }
-        }
-    }
-}
-
-bool rebuildFuelCellPorts(ncfr::Grid& grid, const std::vector<int>& fuelIndices) {
-    clearFuelCellPorts(grid);
-    const std::vector<int> unique = uniqueFuelIndices(fuelIndices);
-    const std::vector<ncfr::Pos> positions = fuelCellPortPositions(grid);
-    if (positions.size() < unique.size() * 2) {
-        return false;
-    }
-
-    size_t positionIndex = 0;
-    for (int fuelIndex : unique) {
-        const ncfr::Pos inputPos = positions.at(positionIndex++);
-        grid.at(inputPos.x, inputPos.y, inputPos.z) =
-            {ncfr::BlockKind::CellPort, ncfr::fuelCellPortType(fuelIndex, ncfr::FuelCellPortRole::Input)};
-
-        const ncfr::Pos outputPos = positions.at(positionIndex++);
-        grid.at(outputPos.x, outputPos.y, outputPos.z) =
-            {ncfr::BlockKind::CellPort, ncfr::fuelCellPortType(fuelIndex, ncfr::FuelCellPortRole::Output)};
-    }
-    return true;
-}
-
 QString blockKindKey(ncfr::BlockKind kind) {
     switch (kind) {
     case ncfr::BlockKind::Empty:
@@ -479,17 +373,11 @@ QJsonObject fuelToJson(int fuelIndex) {
     return {
         {QStringLiteral("index"), fuelIndex},
         {QStringLiteral("familyZh"), fromUtf8String(fuel.familyZh)},
-        {QStringLiteral("familyEn"), fromUtf8String(fuel.familyEn)},
-        {QStringLiteral("code"), fromUtf8String(fuel.code)},
         {QStringLiteral("formZh"), fromUtf8String(fuel.formZh)},
         {QStringLiteral("nameZh"), fromUtf8String(fuel.nameZh)},
-        {QStringLiteral("nameEn"), fromUtf8String(fuel.nameEn)},
-        {QStringLiteral("time"), fuel.time},
         {QStringLiteral("heat"), fuel.heat},
-        {QStringLiteral("efficiency"), fuel.efficiency},
         {QStringLiteral("criticality"), fuel.criticality},
         {QStringLiteral("intrinsicFlux"), fuel.intrinsicFlux},
-        {QStringLiteral("decayFactor"), fuel.decayFactor},
         {QStringLiteral("selfPriming"), fuel.selfPriming},
     };
 }
@@ -512,10 +400,7 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
         const ncfr::FuelCellPortRole role = ncfr::fuelCellPortRole(block.type);
         typedData.insert(QStringLiteral("fuelIndex"), fuelIndex);
         typedData.insert(QStringLiteral("familyZh"), fromUtf8String(fuel.familyZh));
-        typedData.insert(QStringLiteral("familyEn"), fromUtf8String(fuel.familyEn));
-        typedData.insert(QStringLiteral("code"), fromUtf8String(fuel.code));
         typedData.insert(QStringLiteral("fuelNameZh"), fromUtf8String(fuel.nameZh));
-        typedData.insert(QStringLiteral("fuelNameEn"), fromUtf8String(fuel.nameEn));
         typedData.insert(QStringLiteral("role"), role == ncfr::FuelCellPortRole::Output
                                                    ? QStringLiteral("output")
                                                    : QStringLiteral("input"));
@@ -536,11 +421,8 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
         const ncfr::Fuel& fuel = ncfr::fuels().at(static_cast<size_t>(block.type));
         typedData.insert(QStringLiteral("index"), block.type);
         typedData.insert(QStringLiteral("familyZh"), fromUtf8String(fuel.familyZh));
-        typedData.insert(QStringLiteral("familyEn"), fromUtf8String(fuel.familyEn));
-        typedData.insert(QStringLiteral("code"), fromUtf8String(fuel.code));
         typedData.insert(QStringLiteral("formZh"), fromUtf8String(fuel.formZh));
         typedData.insert(QStringLiteral("nameZh"), fromUtf8String(fuel.nameZh));
-        typedData.insert(QStringLiteral("nameEn"), fromUtf8String(fuel.nameEn));
         typedData.insert(QStringLiteral("heat"), fuel.heat);
         typedData.insert(QStringLiteral("criticality"), fuel.criticality);
         typedData.insert(QStringLiteral("selfPriming"), fuel.selfPriming);
@@ -548,11 +430,9 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
     }
     case ncfr::BlockKind::Moderator: {
         const ncfr::ModeratorType& moderator = ncfr::moderatorTypes().at(static_cast<size_t>(block.type));
-        typedData.insert(QStringLiteral("registryName"), fromUtf8String(moderator.registryName));
         typedData.insert(QStringLiteral("nameZh"), fromUtf8String(moderator.nameZh));
         typedData.insert(QStringLiteral("nameEn"), fromUtf8String(moderator.nameEn));
         typedData.insert(QStringLiteral("fluxFactor"), moderator.fluxFactor);
-        typedData.insert(QStringLiteral("efficiency"), moderator.efficiency);
         break;
     }
     case ncfr::BlockKind::Reflector: {
@@ -560,7 +440,6 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
         typedData.insert(QStringLiteral("registryName"), fromUtf8String(reflector.registryName));
         typedData.insert(QStringLiteral("nameZh"), fromUtf8String(reflector.nameZh));
         typedData.insert(QStringLiteral("nameEn"), fromUtf8String(reflector.nameEn));
-        typedData.insert(QStringLiteral("efficiency"), reflector.efficiency);
         typedData.insert(QStringLiteral("reflectivity"), reflector.reflectivity);
         break;
     }
@@ -570,7 +449,6 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
         typedData.insert(QStringLiteral("nameZh"), fromUtf8String(shield.nameZh));
         typedData.insert(QStringLiteral("nameEn"), fromUtf8String(shield.nameEn));
         typedData.insert(QStringLiteral("heatPerFlux"), shield.heatPerFlux);
-        typedData.insert(QStringLiteral("efficiency"), shield.efficiency);
         break;
     }
     case ncfr::BlockKind::Irradiator: {
@@ -581,7 +459,6 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
         typedData.insert(QStringLiteral("nameZh"), fromUtf8String(recipe.nameZh));
         typedData.insert(QStringLiteral("nameEn"), fromUtf8String(recipe.nameEn));
         typedData.insert(QStringLiteral("heatPerFlux"), recipe.heatPerFlux);
-        typedData.insert(QStringLiteral("efficiency"), recipe.efficiency);
         break;
     }
     case ncfr::BlockKind::Conductor:
@@ -595,7 +472,6 @@ QJsonObject typedBlockDataToJson(const ncfr::Block& block) {
         typedData.insert(QStringLiteral("ruleId"), fromUtf8String(sink.ruleId));
         typedData.insert(QStringLiteral("sourceName"), fromUtf8String(sink.sourceName));
         typedData.insert(QStringLiteral("nameZh"), fromUtf8String(sink.nameZh));
-        typedData.insert(QStringLiteral("nameEn"), fromUtf8String(sink.nameEn));
         typedData.insert(QStringLiteral("cooling"), sink.cooling);
         typedData.insert(QStringLiteral("rule"), fromUtf8String(sink.rule));
         break;
@@ -638,11 +514,9 @@ QJsonArray selectedModeratorsToJson(const ncfr::BuildRequest& request) {
         const ncfr::ModeratorType& moderator = ncfr::moderatorTypes().at(static_cast<size_t>(moderatorIndex));
         array.append(QJsonObject{
             {QStringLiteral("index"), moderatorIndex},
-            {QStringLiteral("registryName"), fromUtf8String(moderator.registryName)},
             {QStringLiteral("nameZh"), fromUtf8String(moderator.nameZh)},
             {QStringLiteral("nameEn"), fromUtf8String(moderator.nameEn)},
             {QStringLiteral("fluxFactor"), moderator.fluxFactor},
-            {QStringLiteral("efficiency"), moderator.efficiency},
         });
     }
     return array;
@@ -657,7 +531,6 @@ QJsonArray selectedReflectorsToJson(const ncfr::BuildRequest& request) {
             {QStringLiteral("registryName"), fromUtf8String(reflector.registryName)},
             {QStringLiteral("nameZh"), fromUtf8String(reflector.nameZh)},
             {QStringLiteral("nameEn"), fromUtf8String(reflector.nameEn)},
-            {QStringLiteral("efficiency"), reflector.efficiency},
             {QStringLiteral("reflectivity"), reflector.reflectivity},
         });
     }
@@ -677,7 +550,6 @@ QJsonObject irradiatorRecipeToJson(int recipeIndex) {
         {QStringLiteral("nameZh"), fromUtf8String(recipe.nameZh)},
         {QStringLiteral("nameEn"), fromUtf8String(recipe.nameEn)},
         {QStringLiteral("heatPerFlux"), recipe.heatPerFlux},
-        {QStringLiteral("efficiency"), recipe.efficiency},
     };
 }
 
@@ -957,12 +829,11 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
             recipeCombo->addItem(fromUtf8String(recipe.nameZh), i);
             recipeCombo->setItemData(
                 i,
-                QString::fromUtf8("英文：%1\n输入：%2\n输出：%3\n产热/通量：%4\n效率：%5")
+                QString::fromUtf8("英文：%1\n输入：%2\n输出：%3\n产热/通量：%4")
                     .arg(fromUtf8String(recipe.nameEn))
                     .arg(fromUtf8String(recipe.inputName))
                     .arg(fromUtf8String(recipe.outputName))
-                    .arg(recipe.heatPerFlux, 0, 'f', 2)
-                    .arg(recipe.efficiency, 0, 'f', 2),
+                    .arg(recipe.heatPerFlux, 0, 'f', 2),
                 Qt::ToolTipRole);
         }
         const int defaultRecipeIndex = ncfr::defaultIrradiatorRecipeIndex();
@@ -986,10 +857,9 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
         reflectorCombo->addCheckedItem(
             fromUtf8String(reflector.nameZh),
             i,
-            QString::fromUtf8("英文：%1\n反射率：%2\n效率：%3")
+            QString::fromUtf8("英文：%1\n反射率：%2")
                 .arg(fromUtf8String(reflector.nameEn))
-                .arg(reflector.reflectivity, 0, 'f', 2)
-                .arg(reflector.efficiency, 0, 'f', 2));
+                .arg(reflector.reflectivity, 0, 'f', 2));
     }
     reflectorLayout->addWidget(new QLabel(QString::fromUtf8("中子反射器"), reflectorRow));
     reflectorLayout->addWidget(reflectorCombo, 1);
@@ -1007,10 +877,9 @@ QWidget* MainWindow::createFuelInputPanel(const QString& title, FuelInputControl
         moderatorCombo->addCheckedItem(
             fromUtf8String(moderator.nameZh),
             i,
-            QString::fromUtf8("英文：%1\n中子通量：%2\n效率：%3")
+            QString::fromUtf8("英文：%1\n中子通量：%2")
                 .arg(fromUtf8String(moderator.nameEn))
-                .arg(moderator.fluxFactor)
-                .arg(moderator.efficiency, 0, 'f', 2));
+                .arg(moderator.fluxFactor));
     }
     moderatorLayout->addWidget(new QLabel(QString::fromUtf8("减速剂"), moderatorRow));
     moderatorLayout->addWidget(moderatorCombo, 1);
@@ -1443,8 +1312,8 @@ void MainWindow::showFuelReplacementCandidates(int x, int y, int z, int index) {
         }
         auto* item = new QListWidgetItem(text, fuelReplacementList_);
         item->setData(Qt::UserRole, i);
-        item->setToolTip(QString::fromUtf8("%1\n临界因子：%2\n基础产热：%3 H/t")
-                             .arg(fromUtf8String(fuel.code))
+        item->setToolTip(QString::fromUtf8("燃料：%1\n临界因子：%2\n基础产热：%3 H/t")
+                             .arg(fromUtf8String(fuel.nameZh))
                              .arg(fuel.criticality)
                              .arg(fuel.heat));
         if (i == block.type) {
@@ -1480,8 +1349,8 @@ void MainWindow::replaceSelectedFuel(QListWidgetItem* item) {
     }
     target.type = fuelIndex;
 
-    std::vector<int> fuelIndices = fuelIndicesInGrid(trial);
-    if (!rebuildFuelCellPorts(trial, fuelIndices)) {
+    std::vector<int> fuelIndices = ncfr::fuelIndicesInGrid(trial);
+    if (!ncfr::rebuildFuelCellPorts(trial, fuelIndices)) {
         QMessageBox::warning(this, QString::fromUtf8("警告"),
                              replacementFailureMessage(QString::fromUtf8("外壳空间不足，无法为替换后的燃料集合重建输入/输出燃料单元端口。")));
         return;
@@ -1498,11 +1367,7 @@ void MainWindow::replaceSelectedFuel(QListWidgetItem* item) {
 
     currentResult_->grid = std::move(trial);
     currentResult_->request = std::move(trialRequest);
-    currentResult_->minCoolingMargin = sim.minClusterMargin;
-    currentResult_->usefulBlocks = countUsefulBlocks(currentResult_->grid);
-    currentResult_->disconnectedFunctionalBlocks = sim.disconnectedFunctionalBlocks;
-    currentResult_->functionalIrradiators = countFunctionalIrradiators(sim);
-    currentResult_->irradiatorFlux = totalIrradiatorFlux(sim);
+    ncfr::updateResultMetrics(*currentResult_, sim);
 
     const int currentLayer = layerSpin_ != nullptr ? layerSpin_->value() - 1 : pos.z;
     gridWidget_->setGrid(&currentResult_->grid);

@@ -1,6 +1,10 @@
 #include "Optimizer.h"
 
-#include "OptimizerDetail.h"
+#include "OptimizerCommon.h"
+#include "OptimizerDirectional.h"
+#include "OptimizerIrradiator.h"
+#include "OptimizerMerge.h"
+#include "OptimizerSingle.h"
 #include "Perf.h"
 
 #include <exception>

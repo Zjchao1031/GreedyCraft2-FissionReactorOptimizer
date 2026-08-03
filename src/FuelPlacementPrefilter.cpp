@@ -2,12 +2,12 @@
 
 #include "Data.h"
 #include "NeutronRules.h"
+#include "NeutronLineTraversal.h"
 #include "Optimizer.h"
 #include "Simulator.h"
 #include "StateVector.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -16,21 +16,6 @@ namespace ncfr {
 namespace {
 
 constexpr double kFluxEpsilon = 1e-9;
-
-struct Direction {
-    int dx = 0;
-    int dy = 0;
-    int dz = 0;
-};
-
-constexpr std::array<Direction, 6> kDirections = {{
-    {1, 0, 0},
-    {-1, 0, 0},
-    {0, 1, 0},
-    {0, -1, 0},
-    {0, 0, 1},
-    {0, 0, -1},
-}};
 
 Pos indexToPos(const Grid& grid, int idx) {
     const int x = idx % grid.width();
@@ -97,71 +82,6 @@ bool anySeeded(const std::vector<int>& cellIndices, const StateVector& seeded) {
     });
 }
 
-void traceFuelRelationLine(const Grid& grid, const Fuel& fuel, const Pos& from, const Direction& dir,
-                           std::vector<double>& fluxByIndex, std::vector<double>& irradiatorFluxByIndex) {
-    const int fromIndex = grid.index(from.x, from.y, from.z);
-    Pos next{from.x + dir.dx, from.y + dir.dy, from.z + dir.dz};
-    if (!grid.inBounds(next.x, next.y, next.z)) {
-        return;
-    }
-
-    const Block& adjacent = grid.at(next.x, next.y, next.z);
-    if (fuel.intrinsicFlux > 0.0) {
-        if (adjacent.kind == BlockKind::FuelCell) {
-            const int toIndex = grid.index(next.x, next.y, next.z);
-            fluxByIndex.at(static_cast<size_t>(toIndex)) += fuel.intrinsicFlux;
-            return;
-        }
-        if (adjacent.kind == BlockKind::Irradiator && adjacent.type >= 0) {
-            const int toIndex = grid.index(next.x, next.y, next.z);
-            irradiatorFluxByIndex.at(static_cast<size_t>(toIndex)) += fuel.intrinsicFlux;
-            return;
-        }
-    }
-
-    double lineFlux = fuel.intrinsicFlux;
-    int moderatorCount = 0;
-    Pos cur = next;
-    for (int step = 1; step <= kNeutronReach; ++step) {
-        if (!grid.inBounds(cur.x, cur.y, cur.z)) {
-            return;
-        }
-        const int curIndex = grid.index(cur.x, cur.y, cur.z);
-        const Block& block = grid.atIndex(curIndex);
-        if (block.kind == BlockKind::Moderator && block.type >= 0) {
-            const auto& moderator = moderatorTypes().at(static_cast<size_t>(block.type));
-            lineFlux += moderator.fluxFactor;
-            ++moderatorCount;
-        } else if (block.kind == BlockKind::Shield && block.type >= 0) {
-            // Shields preserve the neutron line but do not add relation flux.
-        } else {
-            return;
-        }
-
-        Pos target{cur.x + dir.dx, cur.y + dir.dy, cur.z + dir.dz};
-        if (!grid.inBounds(target.x, target.y, target.z)) {
-            return;
-        }
-        const int targetIndex = grid.index(target.x, target.y, target.z);
-        const Block& targetBlock = grid.atIndex(targetIndex);
-        if (targetBlock.kind == BlockKind::FuelCell) {
-            fluxByIndex.at(static_cast<size_t>(targetIndex)) += lineFlux;
-            return;
-        }
-        if (targetBlock.kind == BlockKind::Irradiator && targetBlock.type >= 0) {
-            irradiatorFluxByIndex.at(static_cast<size_t>(targetIndex)) += lineFlux;
-            return;
-        }
-        if (targetBlock.kind == BlockKind::Reflector && targetBlock.type >= 0 &&
-            step <= kMaxReflectorLineModerators) {
-            const auto& reflector = reflectorTypes().at(static_cast<size_t>(targetBlock.type));
-            fluxByIndex.at(static_cast<size_t>(fromIndex)) += std::floor(2.0 * lineFlux * reflector.reflectivity);
-            return;
-        }
-        cur = target;
-    }
-}
-
 void traceFuelRelations(const Grid& grid, const std::vector<int>& cellIndices, const StateVector& running,
                         std::vector<double>& fluxByIndex, std::vector<double>& irradiatorFluxByIndex) {
     std::fill(fluxByIndex.begin(), fluxByIndex.end(), 0.0);
@@ -172,8 +92,24 @@ void traceFuelRelations(const Grid& grid, const std::vector<int>& cellIndices, c
         }
         const Fuel& fuel = fuels().at(static_cast<size_t>(grid.atIndex(idx).type));
         const Pos from = indexToPos(grid, idx);
-        for (const Direction& dir : kDirections) {
-            traceFuelRelationLine(grid, fuel, from, dir, fluxByIndex, irradiatorFluxByIndex);
+        for (const Pos& direction : kNeutronLineDirections) {
+            const NeutronLineResult result =
+                traceNeutronLine(grid, fuel, from, direction);
+            switch (result.endpoint) {
+            case NeutronLineEndpoint::FuelCell:
+                fluxByIndex.at(static_cast<size_t>(result.targetIndex)) +=
+                    result.flux;
+                break;
+            case NeutronLineEndpoint::Irradiator:
+                irradiatorFluxByIndex.at(
+                    static_cast<size_t>(result.targetIndex)) += result.flux;
+                break;
+            case NeutronLineEndpoint::Reflector:
+                fluxByIndex.at(static_cast<size_t>(idx)) += result.flux;
+                break;
+            case NeutronLineEndpoint::None:
+                break;
+            }
         }
     }
 }

@@ -1,5 +1,9 @@
-#include "OptimizerDetail.h"
+#include "OptimizerIrradiator.h"
 
+#include "OptimizerCommon.h"
+#include "OptimizerCooling.h"
+#include "OptimizerDiagnostics.h"
+#include "OptimizerDirectional.h"
 #include "NeutronRules.h"
 #include "Perf.h"
 
@@ -76,9 +80,9 @@ int wallConnectionPerpendicularDirectionIndex(int directionIndex) {
     }
 }
 
-std::string fuelCodeOrName(int fuelIndex) {
+std::string fuelName(int fuelIndex) {
     const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
-    return fuel.code.empty() ? fuel.nameZh : fuel.code;
+    return fuel.nameZh;
 }
 
 int strongestSelectedModeratorType(const BuildRequest& request) {
@@ -575,7 +579,7 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
         if (!activation.has_value()) {
             std::ostringstream os;
             const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
-            os << "燃料 " << fuelCodeOrName(fuelIndex)
+            os << "燃料 " << fuelName(fuelIndex)
                << " 无法在中心辐照仓固定骨架中通过动态减速剂 + 反射器组合安全达到临界：临界因子 "
                << fuel.criticality << "，允许上限 " << 2.0 * fuel.criticality
                << "。";
@@ -629,7 +633,7 @@ Grid buildIrradiatorSkeletonGrid(const BuildRequest& request, FixedIrradiatorSke
         std::optional<Pos> sourcePos = findSourceForFuel(grid, skeleton, directionIndex, fuelPos, activation);
         if (!sourcePos.has_value()) {
             std::ostringstream os;
-            os << "无法为非自启动燃料 " << fuelCodeOrName(fuelIndex)
+            os << "无法为非自启动燃料 " << fuelName(fuelIndex)
                << " 放置能够指向该燃料的外壁中子源。";
             throw std::runtime_error(os.str());
         }

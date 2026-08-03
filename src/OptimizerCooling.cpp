@@ -1,5 +1,9 @@
-#include "OptimizerDetail.h"
+#include "OptimizerCooling.h"
 
+#include "OptimizerCommon.h"
+#include "OptimizerConductorBridge.h"
+#include "OptimizerDiagnostics.h"
+#include "OptimizerDirectional.h"
 #include "Perf.h"
 
 #include <algorithm>
@@ -80,10 +84,6 @@ bool isCoolingExpansionAnchor(const Grid& grid, const FuelSimulation& sim, int i
     default:
         return false;
     }
-}
-
-bool samePos(const Pos& lhs, const Pos& rhs) {
-    return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
 }
 
 bool connectsToHeatingCluster(const Grid& grid, const FuelSimulation& sim, const Pos& pos) {

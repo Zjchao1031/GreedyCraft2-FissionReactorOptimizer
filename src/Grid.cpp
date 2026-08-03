@@ -179,10 +179,7 @@ std::string blockDisplayName(const Block& block) {
     case BlockKind::VentOut:
         return "裂变通风口(输出)";
     case BlockKind::Source:
-        if (block.type < 0) {
-            return "任意中子源";
-        }
-        return sourceTypes().at(static_cast<size_t>(block.type)).nameZh;
+        return "任意中子源";
     case BlockKind::FuelCell:
         if (block.type >= 0) {
             return fuels().at(static_cast<size_t>(block.type)).nameZh;
