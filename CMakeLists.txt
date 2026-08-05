@@ -21,29 +21,55 @@ qt_add_executable(fission_reactor
     WIN32
     src/main.cpp
     src/Data.cpp
-    src/FuelSpecialCases.h
     src/FuelPlacementPrefilter.cpp
-    src/FuelPlacementPrefilter.h
     src/Grid.cpp
     src/MainWindow.cpp
-    src/MainWindow.h
-    src/NeutronRules.h
+    src/NeutronLineTraversal.cpp
     src/Optimizer.cpp
     src/OptimizerCommon.cpp
+    src/OptimizerConductorBridge.cpp
     src/OptimizerCooling.cpp
-    src/OptimizerDetail.h
-    src/OptimizerDual.cpp
+    src/OptimizerDirectional.cpp
+    src/OptimizerDirectionalCompaction.cpp
     src/OptimizerIrradiator.cpp
     src/OptimizerMerge.cpp
+    src/OptimizerMixedSpecialCooling.cpp
     src/OptimizerSingle.cpp
+    src/OptimizerSingleSpecialCooling.cpp
+    src/OptimizerSpecialCoolingCommon.cpp
     src/Perf.cpp
-    src/Perf.h
+    src/ReactorAssembly.cpp
     src/ReactorGridWidget.cpp
-    src/ReactorGridWidget.h
+    src/ReactorMetrics.cpp
     src/Rule.cpp
     src/Simulator.cpp
-    src/StateVector.h
+    include/Data.h
+    include/FuelPlacementPrefilter.h
+    include/FuelSpecialCases.h
+    include/Grid.h
+    include/MainWindow.h
+    include/NeutronLineTraversal.h
+    include/NeutronRules.h
+    include/Optimizer.h
+    include/OptimizerCommon.h
+    include/OptimizerConductorBridge.h
+    include/OptimizerCooling.h
+    include/OptimizerDiagnostics.h
+    include/OptimizerDirectional.h
+    include/OptimizerIrradiator.h
+    include/OptimizerMerge.h
+    include/OptimizerSingle.h
+    include/OptimizerSpecialCooling.h
+    include/OptimizerTypes.h
+    include/Output.h
+    include/Perf.h
+    include/ReactorAssembly.h
+    include/ReactorGridWidget.h
+    include/ReactorMetrics.h
+    include/Rule.h
+    include/Simulator.h
+    include/StateVector.h
 )
 
-target_include_directories(fission_reactor PRIVATE src)
+target_include_directories(fission_reactor PRIVATE include)
 target_link_libraries(fission_reactor PRIVATE Qt6::Widgets)
