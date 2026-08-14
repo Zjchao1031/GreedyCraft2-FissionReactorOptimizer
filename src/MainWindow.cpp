@@ -1116,6 +1116,22 @@ void MainWindow::generateLayout(const FuelInputControls& controls) {
             return;
         }
     }
+    if (controls.fixedFuelCellCount == 5) {
+        try {
+            const long long rawHeating = ncfr::irradiatorInputRawHeating(request);
+            if (ncfr::blocksIrradiatorGeneration(rawHeating)) {
+                QMessageBox::warning(
+                    this,
+                    QString::fromUtf8("燃料不适用于辐照结构"),
+                    QString::fromUtf8(
+                        "辐照结构输入预检的总发热为 %1 H/t，超过 12905 H/t 上限，无法生成满足要求的结构。")
+                        .arg(rawHeating));
+                return;
+            }
+        } catch (const std::exception&) {
+            // Let the optimizer report structural input errors through its established worker path.
+        }
+    }
     setGenerationButtonsEnabled(false);
     exportJsonButton_->setEnabled(false);
     statusBar()->showMessage(QString::fromUtf8("正在生成方案中"));

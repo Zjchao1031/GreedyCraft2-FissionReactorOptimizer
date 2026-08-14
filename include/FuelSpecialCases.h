@@ -11,6 +11,7 @@ inline constexpr double kEndStoneFallbackFuelHeatLimit = 2515.0;
 inline constexpr double kCarobbiiteFallbackFuelHeatLimit = 3075.0;
 inline constexpr double kManaDustFallbackFuelHeatLimit = 3715.0;
 inline constexpr double kNormalSingleFuelHeatLimit = kManaDustFallbackFuelHeatLimit;
+inline constexpr double kIrradiatorTotalFuelHeatLimit = 12905.0;
 inline constexpr long long kEndStoneFallbackCoolingCapacity = 325;
 inline constexpr long long kCarobbiiteFallbackCoolingCapacity = 560;
 inline constexpr long long kEndStoneCarobbiiteFallbackCoolingCapacity =
@@ -82,6 +83,10 @@ inline bool usesSpecialManaDustCornerSinks(const Fuel& fuel) {
 
 inline bool blocksNormalSingleFuelGeneration(const Fuel& fuel) {
     return fuel.heat > kNormalSingleFuelHeatLimit;
+}
+
+inline bool blocksIrradiatorGeneration(long long rawHeating) {
+    return rawHeating > kIrradiatorTotalFuelHeatLimit;
 }
 
 } // namespace ncfr

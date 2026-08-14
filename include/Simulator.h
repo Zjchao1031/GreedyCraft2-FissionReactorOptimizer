@@ -52,6 +52,9 @@ FuelSimulation simulateMixedFuel(const Grid& grid, const SimulationOptions& opti
 WallConnectionResult evaluateHeatingClusterWallConnections(const Grid& grid, const FuelSimulation& sim);
 bool hasSafeFuelFlux(const Grid& grid, const FuelSimulation& sim);
 bool hasInvalidSinks(const Grid& grid, const FuelSimulation& sim);
+long long overallCoolingMargin(const FuelSimulation& sim);
+bool hasOverallCoolingMargin(const FuelSimulation& sim);
+bool isOverallCoolingOperatingSimulation(const Grid& grid, const FuelSimulation& sim);
 bool isSearchOperatingSimulation(const Grid& grid, const FuelSimulation& sim);
 bool isSafeOperatingSimulation(const Grid& grid, const FuelSimulation& sim);
 

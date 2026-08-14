@@ -50,7 +50,10 @@ bool isRequiredSupportBlock(const Grid& grid, const FuelSimulation& sim,
                             int idx);
 void pruneInactiveSupport(Grid& grid,
                           const StateVector* protectedPositions = nullptr);
-CandidateScore scoreSimulation(const Grid& grid, const FuelSimulation& sim);
+CandidateScore scoreSimulation(
+    const Grid& grid, const FuelSimulation& sim,
+    CoolingValidationPolicy coolingPolicy =
+        CoolingValidationPolicy::PerCluster);
 bool betterScore(const CandidateScore& lhs, const CandidateScore& rhs);
 std::vector<Pos> improvementPositions(
     const Grid& grid, const FuelSimulation& sim, const ImproveOptions& options,
@@ -59,7 +62,9 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
                           const ImproveOptions& options = kDefaultImproveOptions,
                           const SupportBlockOptions* supportOptions = nullptr,
                           const StateVector* protectedPositions = nullptr,
-                          bool emptyOnly = false);
+                          bool emptyOnly = false,
+                          CoolingValidationPolicy coolingPolicy =
+                              CoolingValidationPolicy::PerCluster);
 OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request,
                                         const FuelSimulation& sim);
 bool isSearchAccepted(const Grid& grid, const FuelSimulation& sim);

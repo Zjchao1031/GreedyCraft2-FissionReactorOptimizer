@@ -357,8 +357,14 @@ bool coolingExpansionStartAllowed(const Grid& grid, const FuelSimulation& sim,
            (allowDisconnectedFunctionalBlocks || sim.disconnectedFunctionalBlocks == 0);
 }
 
-bool coolingExpansionGoalReached(const FuelSimulation& sim, bool allowDisconnectedFunctionalBlocks) {
-    return sim.compatible && sim.minClusterMargin >= 0 &&
+bool coolingExpansionGoalReached(
+    const FuelSimulation& sim, bool allowDisconnectedFunctionalBlocks,
+    CoolingValidationPolicy coolingPolicy) {
+    const bool coolingAccepted =
+        coolingPolicy == CoolingValidationPolicy::Overall
+            ? hasOverallCoolingMargin(sim)
+            : sim.compatible && sim.minClusterMargin >= 0;
+    return coolingAccepted &&
            (allowDisconnectedFunctionalBlocks || sim.disconnectedFunctionalBlocks == 0);
 }
 
@@ -370,7 +376,23 @@ bool coolingExpansionHandoffReached(const FuelSimulation& sim,
 }
 
 bool coolingExpansionMakesProgress(const FuelSimulation& trialSim, const FuelSimulation& currentSim,
-                                    bool allowDisconnectedFunctionalBlocks) {
+                                   bool allowDisconnectedFunctionalBlocks,
+                                   CoolingValidationPolicy coolingPolicy) {
+    if (coolingPolicy == CoolingValidationPolicy::Overall) {
+        if (!hasOverallCoolingMargin(currentSim) &&
+            hasOverallCoolingMargin(trialSim)) {
+            return true;
+        }
+        if (allowDisconnectedFunctionalBlocks &&
+            trialSim.disconnectedFunctionalBlocks <
+                currentSim.disconnectedFunctionalBlocks &&
+            overallCoolingMargin(trialSim) >=
+                overallCoolingMargin(currentSim)) {
+            return true;
+        }
+        return overallCoolingMargin(trialSim) >
+               overallCoolingMargin(currentSim);
+    }
     if (!currentSim.compatible && trialSim.compatible) {
         return true;
     }
@@ -383,12 +405,22 @@ bool coolingExpansionMakesProgress(const FuelSimulation& trialSim, const FuelSim
 }
 
 bool betterCoolingExpansionSimulation(const FuelSimulation& lhs, const FuelSimulation& rhs,
-                                      bool allowDisconnectedFunctionalBlocks) {
-    if (lhs.compatible != rhs.compatible) {
-        return lhs.compatible;
-    }
-    if (lhs.minClusterMargin != rhs.minClusterMargin) {
-        return lhs.minClusterMargin > rhs.minClusterMargin;
+                                       bool allowDisconnectedFunctionalBlocks,
+                                       CoolingValidationPolicy coolingPolicy) {
+    if (coolingPolicy == CoolingValidationPolicy::Overall) {
+        if (hasOverallCoolingMargin(lhs) != hasOverallCoolingMargin(rhs)) {
+            return hasOverallCoolingMargin(lhs);
+        }
+        if (overallCoolingMargin(lhs) != overallCoolingMargin(rhs)) {
+            return overallCoolingMargin(lhs) > overallCoolingMargin(rhs);
+        }
+    } else {
+        if (lhs.compatible != rhs.compatible) {
+            return lhs.compatible;
+        }
+        if (lhs.minClusterMargin != rhs.minClusterMargin) {
+            return lhs.minClusterMargin > rhs.minClusterMargin;
+        }
     }
     if (allowDisconnectedFunctionalBlocks &&
         lhs.disconnectedFunctionalBlocks != rhs.disconnectedFunctionalBlocks) {
@@ -400,10 +432,12 @@ bool betterCoolingExpansionSimulation(const FuelSimulation& lhs, const FuelSimul
 Grid expandCoolingWithPreserver(Grid grid, const std::function<bool(Grid&)>& preserveGrid,
                                 const std::atomic_bool* cancelRequested,
                                 const CoolingExpansionOptions& options,
-                                bool allowDisconnectedFunctionalBlocks) {
+                                bool allowDisconnectedFunctionalBlocks,
+                                CoolingValidationPolicy coolingPolicy) {
     FuelSimulation currentSim = simulateMixedFuel(grid);
     if (!coolingExpansionStartAllowed(grid, currentSim, allowDisconnectedFunctionalBlocks) ||
-        coolingExpansionGoalReached(currentSim, allowDisconnectedFunctionalBlocks)) {
+        coolingExpansionGoalReached(
+            currentSim, allowDisconnectedFunctionalBlocks, coolingPolicy)) {
         return grid;
     }
 #ifndef NDEBUG
@@ -512,13 +546,17 @@ Grid expandCoolingWithPreserver(Grid grid, const std::function<bool(Grid&)>& pre
 #endif
                 continue;
             }
-            if (!coolingExpansionMakesProgress(trialSim, currentSim, allowDisconnectedFunctionalBlocks)) {
+            if (!coolingExpansionMakesProgress(
+                    trialSim, currentSim, allowDisconnectedFunctionalBlocks,
+                    coolingPolicy)) {
 #ifndef NDEBUG
                 recordCoolingExpansionRejection(passStats, "noMarginGain", &trialSim);
 #endif
                 continue;
             }
-            if (betterCoolingExpansionSimulation(trialSim, bestSim, allowDisconnectedFunctionalBlocks)) {
+            if (betterCoolingExpansionSimulation(
+                    trialSim, bestSim, allowDisconnectedFunctionalBlocks,
+                    coolingPolicy)) {
                 bestSim = std::move(trialSim);
                 bestGrid = std::move(trial);
                 bestPos = pos;
@@ -560,7 +598,8 @@ Grid expandCoolingWithPreserver(Grid grid, const std::function<bool(Grid&)>& pre
 #endif
             break;
         }
-        if (coolingExpansionGoalReached(currentSim, allowDisconnectedFunctionalBlocks)) {
+        if (coolingExpansionGoalReached(
+                currentSim, allowDisconnectedFunctionalBlocks, coolingPolicy)) {
 #ifndef NDEBUG
             logCoolingExpansionCheckpoint("success", grid, currentSim, pass);
 #endif

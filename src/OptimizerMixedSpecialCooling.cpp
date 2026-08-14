@@ -16,11 +16,32 @@
 #include <vector>
 namespace ncfr::optimizer_detail {
 
+namespace {
+
+bool isMixedSpecialCoolingAccepted(
+    const Grid& grid, const FuelSimulation& sim,
+    bool allowDisconnectedFunctionalBlocks,
+    CoolingValidationPolicy coolingPolicy) {
+    if (coolingPolicy == CoolingValidationPolicy::Overall) {
+        return isPreCompactRunnable(sim) && hasOverallCoolingMargin(sim) &&
+               hasSafeFuelFlux(grid, sim) && !hasInvalidSinks(grid, sim) &&
+               (allowDisconnectedFunctionalBlocks ||
+                sim.disconnectedFunctionalBlocks == 0);
+    }
+    return isSearchAccepted(grid, sim) ||
+           (allowDisconnectedFunctionalBlocks && sim.compatible &&
+            sim.minClusterMargin >= 0 && !hasInvalidSinks(grid, sim));
+}
+
+} // namespace
+
 std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
     Grid grid, const BuildRequest& request,
     const std::vector<FuelLayoutContext>& fuelContexts,
     const std::atomic_bool* cancelRequested,
-    bool allowDisconnectedFunctionalBlocks) {
+    bool allowDisconnectedFunctionalBlocks,
+    CoolingValidationPolicy coolingPolicy,
+    std::optional<long long> manaDustCoolingHandoffThreshold) {
     FuelSimulation currentSim = simulateMixedFuel(grid);
     const long long initialDeficit =
         currentSim.rawHeating - currentSim.cooling;
@@ -84,12 +105,9 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
             "baseline", grid, currentSim, initialDeficit, false, false,
             "alreadyBalanced");
 #endif
-        const bool accepted =
-            isSearchAccepted(grid, currentSim) ||
-            (allowDisconnectedFunctionalBlocks &&
-             currentSim.compatible &&
-             currentSim.minClusterMargin >= 0 &&
-             !hasInvalidSinks(grid, currentSim));
+        const bool accepted = isMixedSpecialCoolingAccepted(
+            grid, currentSim, allowDisconnectedFunctionalBlocks,
+            coolingPolicy);
         return accepted
                    ? std::optional<Grid>(std::move(grid))
                    : std::nullopt;
@@ -223,12 +241,9 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
                 allowCarobbiite, allowManaDust,
                 "specialSinks=" + std::to_string(sinks.size()));
 #endif
-            const bool accepted =
-                isSearchAccepted(finalGrid, finalSim) ||
-                (allowDisconnectedFunctionalBlocks &&
-                 finalSim.compatible &&
-                 finalSim.minClusterMargin >= 0 &&
-                 !hasInvalidSinks(finalGrid, finalSim));
+            const bool accepted = isMixedSpecialCoolingAccepted(
+                finalGrid, finalSim, allowDisconnectedFunctionalBlocks,
+                coolingPolicy);
             if (!accepted) {
 #ifndef NDEBUG
                 logDualFuelFallbackCheckpoint(
@@ -487,11 +502,33 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
         }
         return std::nullopt;
     }
-    if (!allowManaDust) {
+    const bool manaDustEnabledByCoolingThreshold =
+        manaDustCoolingHandoffThreshold.has_value() &&
+        currentSim.cooling >= *manaDustCoolingHandoffThreshold;
+    const bool shouldUseManaDust =
+        allowManaDust || manaDustEnabledByCoolingThreshold;
 #ifndef NDEBUG
+    std::string manaDustTriggerDetail =
+        allowManaDust
+            ? "trigger=initialDeficitExceedsCarobbiiteLimit"
+            : "trigger=postCarobbiiteCoolingThreshold";
+    if (manaDustCoolingHandoffThreshold.has_value()) {
+        manaDustTriggerDetail +=
+            " threshold=" +
+            std::to_string(*manaDustCoolingHandoffThreshold);
+    }
+#endif
+    if (!shouldUseManaDust) {
+#ifndef NDEBUG
+        std::string skipDetail = "initialDeficitAtMostCarobbiiteLimit";
+        if (manaDustCoolingHandoffThreshold.has_value()) {
+            skipDetail +=
+                " threshold=" +
+                std::to_string(*manaDustCoolingHandoffThreshold);
+        }
         logDualFuelFallbackCheckpoint(
             "manaDustSkipped", grid, currentSim, initialDeficit,
-            "initialDeficitAtMostCarobbiiteLimit");
+            skipDetail);
 #endif
         return std::nullopt;
     }
@@ -499,7 +536,7 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
 #ifndef NDEBUG
     logDualFuelCoolingCheckpoint(
         "manaDustStart", grid, currentSim, initialDeficit,
-        allowCarobbiite, allowManaDust);
+        allowCarobbiite, shouldUseManaDust, manaDustTriggerDetail);
 #endif
     ManaDustPreparationResult preparation =
         prepareManaDustFallbackGrid(
@@ -579,8 +616,8 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
 #ifndef NDEBUG
     logDualFuelCoolingCheckpoint(
         "afterManaDust", manaGrid, manaSim, initialDeficit,
-        allowCarobbiite, allowManaDust,
-        "manaDustFunctional=" +
+        allowCarobbiite, shouldUseManaDust,
+        manaDustTriggerDetail + " manaDustFunctional=" +
             std::to_string(manaSinksFunctional ? 1 : 0));
 #endif
     if (!manaSinksFunctional) {

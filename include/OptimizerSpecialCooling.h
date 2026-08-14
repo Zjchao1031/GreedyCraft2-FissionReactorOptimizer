@@ -169,6 +169,10 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
     Grid grid, const BuildRequest& request,
     const std::vector<FuelLayoutContext>& fuelContexts,
     const std::atomic_bool* cancelRequested,
-    bool allowDisconnectedFunctionalBlocks = false);
+    bool allowDisconnectedFunctionalBlocks = false,
+    CoolingValidationPolicy coolingPolicy =
+        CoolingValidationPolicy::PerCluster,
+    std::optional<long long> manaDustCoolingHandoffThreshold =
+        std::nullopt);
 
 } // namespace ncfr::optimizer_detail

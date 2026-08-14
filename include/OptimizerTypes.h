@@ -20,6 +20,10 @@ namespace ncfr::optimizer_detail {
 inline constexpr int kMaxSize = 24;
 
 struct Dimension { int a = 1; int b = 1; int c = 1; };
+enum class CoolingValidationPolicy {
+    PerCluster,
+    Overall,
+};
 struct CandidateScore {
     bool compatible = false;
     bool safeFlux = false;

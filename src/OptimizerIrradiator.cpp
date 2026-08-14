@@ -26,6 +26,7 @@ constexpr int kIrradiatorInteriorSize = kMaxSize;
 constexpr int kIrradiatorCenter = 12;
 constexpr int kIrradiatorFuelInputCount = 5;
 constexpr int kIrradiatorFuelDistance = kMaxIrradiatorLineModerators + 1;
+constexpr long long kIrradiatorManaDustCoolingHandoffThreshold = 12265;
 constexpr int kIrradiatorAboveDirectionIndex = 2;
 constexpr int kIrradiatorReservedDirectionIndex = 3;
 constexpr int kIrradiatorRequiredActivationDirectionIndex = kIrradiatorAboveDirectionIndex;
@@ -693,7 +694,8 @@ Grid expandIrradiatorCooling(Grid grid, const FixedIrradiatorSkeleton& skeleton,
         [&](Grid& candidate) {
             return restoreFixedIrradiatorSkeleton(candidate, skeleton);
         },
-        cancelRequested, kIrradiatorCoolingExpansionOptions);
+        cancelRequested, kIrradiatorCoolingExpansionOptions, false,
+        CoolingValidationPolicy::Overall);
 }
 
 FuelLineSpec specialCoolingFuelLine(const ActivationLine& line) {
@@ -827,7 +829,9 @@ std::optional<Grid> tryIrradiatorSpecialCoolingFallback(
 #endif
     std::optional<Grid> special =
         tryMixedFuelSpecialCoolingFallback(
-            grid, request, contexts, cancelRequested, true);
+            grid, request, contexts, cancelRequested, true,
+            CoolingValidationPolicy::Overall,
+            kIrradiatorManaDustCoolingHandoffThreshold);
     if (!special.has_value()) {
 #ifndef NDEBUG
         logIrradiatorSpecialCoolingCheckpoint(
@@ -928,7 +932,8 @@ OptimizationResult optimizeFiveFuelIrradiatorLayout(const BuildRequest& request,
     if (!specialCoolingApplied &&
         !isAcceptedFiveFuelIrradiator(grid, sim)) {
         grid = improveSupportBlocks(std::move(grid), cancelRequested, kIrradiatorImproveOptions,
-                                    &supportOptions);
+                                    &supportOptions, nullptr, false,
+                                    CoolingValidationPolicy::Overall);
         if (!restoreFixedIrradiatorSkeleton(grid, skeleton)) {
             throw std::runtime_error("小范围优化支撑块后无法恢复中心辐照仓固定骨架。");
         }
@@ -1015,3 +1020,31 @@ OptimizationResult optimizeFiveFuelIrradiatorLayout(const BuildRequest& request,
 }
 
 } // namespace ncfr::optimizer_detail
+
+namespace ncfr {
+
+long long irradiatorInputRawHeating(const BuildRequest& request) {
+    const optimizer_detail::SupportBlockOptions supportOptions{
+        request.selectedModeratorTypeIndices,
+        request.selectedReflectorTypeIndices,
+    };
+    optimizer_detail::FixedIrradiatorSkeleton skeleton =
+        optimizer_detail::buildBaseSkeleton(request, nullptr);
+    Grid grid = optimizer_detail::buildIrradiatorSkeletonGrid(request, skeleton);
+    FuelSimulation sim = simulateMixedFuel(grid);
+    optimizer_detail::requireFiveFuelIrradiatorState(grid, sim, "输入预检");
+
+    optimizer_detail::fillSupportBlocks(grid, &supportOptions);
+    if (!optimizer_detail::restoreFixedIrradiatorSkeleton(grid, skeleton)) {
+        throw std::runtime_error("输入预检后无法恢复中心辐照仓固定骨架。");
+    }
+    optimizer_detail::pruneInactiveSupport(grid);
+    if (!optimizer_detail::restoreFixedIrradiatorSkeleton(grid, skeleton)) {
+        throw std::runtime_error("输入预检清理后无法恢复中心辐照仓固定骨架。");
+    }
+    sim = simulateMixedFuel(grid);
+    optimizer_detail::requireFiveFuelIrradiatorState(grid, sim, "输入预检支撑块剪枝后");
+    return sim.rawHeating;
+}
+
+} // namespace ncfr

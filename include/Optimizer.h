@@ -27,7 +27,7 @@ public:
 struct OptimizationResult {
     Grid grid;
     BuildRequest request;
-    long long minCoolingMargin = 0;
+    long long coolingMargin = 0;
     int usefulBlocks = 0;
     int disconnectedFunctionalBlocks = 0;
     int functionalIrradiators = 0;
@@ -38,6 +38,7 @@ struct OptimizationResult {
 };
 
 int requiredSourceCount(const BuildRequest& request);
+long long irradiatorInputRawHeating(const BuildRequest& request);
 bool isFinalReactorValid(const Grid& grid, const BuildRequest& request,
                          const FuelSimulation& sim);
 OptimizationResult optimizeLayout(const BuildRequest& request, const std::atomic_bool* cancelRequested = nullptr);

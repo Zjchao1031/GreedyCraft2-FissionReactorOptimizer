@@ -1036,10 +1036,17 @@ bool removeInvalidSinks(Grid& grid, const FuelSimulation& sim) {
     return removed;
 }
 
-CandidateScore scoreSimulation(const Grid& grid, const FuelSimulation& sim) {
-    return {sim.compatible,
+CandidateScore scoreSimulation(const Grid& grid, const FuelSimulation& sim,
+                               CoolingValidationPolicy coolingPolicy) {
+    const bool usesOverallCooling =
+        coolingPolicy == CoolingValidationPolicy::Overall;
+    return {usesOverallCooling
+                ? isPreCompactRunnable(sim) && hasOverallCoolingMargin(sim)
+                : sim.compatible,
             hasSafeFuelFlux(grid, sim),
-            sim.minClusterMargin,
+            usesOverallCooling
+                ? overallCoolingMargin(sim)
+                : sim.minClusterMargin,
             sim.disconnectedFunctionalBlocks,
             countFunctionalIrradiators(sim),
             countUsefulBlocks(grid),
@@ -1119,7 +1126,8 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
                           const ImproveOptions& options,
                           const SupportBlockOptions* supportOptions,
                           const StateVector* protectedPositions,
-                          bool emptyOnly) {
+                          bool emptyOnly,
+                          CoolingValidationPolicy coolingPolicy) {
     NCFR_PERF_COUNT(improveCalls);
     NCFR_PERF_SCOPE(improveNs);
     const SupportBlockOptions& support =
@@ -1166,7 +1174,8 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
         throwIfCancelled(cancelRequested);
         NCFR_PERF_COUNT(improvePasses);
         FuelSimulation baseSim = simulateMixedFuel(grid);
-        CandidateScore bestScore = scoreSimulation(grid, baseSim);
+        CandidateScore bestScore =
+            scoreSimulation(grid, baseSim, coolingPolicy);
         std::vector<Pos> positions = improvementPositions(grid, baseSim, options, protectedPositions, emptyOnly);
         NCFR_PERF_ADD(improveFrontierPositions, positions.size());
         if (positions.empty()) {
@@ -1195,7 +1204,8 @@ Grid improveSupportBlocks(Grid grid, const std::atomic_bool* cancelRequested,
                 }
                 NCFR_PERF_COUNT(improveTrials);
                 FuelSimulation sim = simulateMixedFuel(trial);
-                CandidateScore trialScore = scoreSimulation(trial, sim);
+                CandidateScore trialScore =
+                    scoreSimulation(trial, sim, coolingPolicy);
                 if (betterScore(trialScore, bestScore)) {
                     bestScore = trialScore;
                     bestGrid = std::move(trial);
