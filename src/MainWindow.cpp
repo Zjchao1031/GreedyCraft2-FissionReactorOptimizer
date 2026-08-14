@@ -214,7 +214,8 @@ std::vector<int> checkedComboValues(const QComboBox* combo) {
     return checkedCombo == nullptr ? std::vector<int>{} : checkedCombo->checkedValues();
 }
 
-QString simulationFailureReason(const ncfr::Grid& grid, const ncfr::FuelSimulation& sim) {
+QString simulationFailureReason(const ncfr::BuildRequest& request, const ncfr::Grid& grid,
+                                const ncfr::FuelSimulation& sim) {
     QStringList reasons;
 
     if (sim.fuelCells <= 0) {
@@ -232,7 +233,10 @@ QString simulationFailureReason(const ncfr::Grid& grid, const ncfr::FuelSimulati
                        .arg(wall.disconnectedHeatingClusters);
     }
 
-    if (sim.minClusterMargin < 0) {
+    if (request.fuelIndices.size() == 5 && !ncfr::hasOverallCoolingMargin(sim)) {
+        reasons << QString::fromUtf8("总体散热余量不足（总体散热余量 %1 H/t）。")
+                       .arg(static_cast<qlonglong>(ncfr::overallCoolingMargin(sim)));
+    } else if (request.fuelIndices.size() != 5 && sim.minClusterMargin < 0) {
         reasons << QString::fromUtf8("散热余量不足（最小散热余量 %1 H/t）。")
                        .arg(static_cast<qlonglong>(sim.minClusterMargin));
     }
@@ -286,7 +290,11 @@ QString simulationFailureReason(const ncfr::Grid& grid, const ncfr::FuelSimulati
         }
     }
 
-    if (reasons.isEmpty() && !sim.compatible) {
+    const bool usesOverallCooling = request.fuelIndices.size() == 5;
+    const bool operating = usesOverallCooling
+        ? ncfr::isOverallCoolingOperatingSimulation(grid, sim)
+        : sim.compatible;
+    if (reasons.isEmpty() && !operating) {
         reasons << QString::fromUtf8("模拟结果不满足反应堆兼容运行判定。");
     }
     if (reasons.isEmpty()) {
@@ -596,7 +604,7 @@ QJsonObject gridToJson(const ncfr::Grid& grid) {
 
 QJsonDocument resultToJsonDocument(const ncfr::OptimizationResult& result) {
     QJsonObject metrics{
-        {QStringLiteral("minCoolingMargin"), static_cast<qint64>(result.minCoolingMargin)},
+        {QStringLiteral("coolingMargin"), static_cast<qint64>(result.coolingMargin)},
         {QStringLiteral("usefulBlocks"), result.usefulBlocks},
         {QStringLiteral("disconnectedFunctionalBlocks"), result.disconnectedFunctionalBlocks},
         {QStringLiteral("functionalIrradiators"), result.functionalIrradiators},
@@ -605,7 +613,7 @@ QJsonDocument resultToJsonDocument(const ncfr::OptimizationResult& result) {
 
     return QJsonDocument(QJsonObject{
         {QStringLiteral("schema"), QStringLiteral("nuclearcraft-fission-reactor-result")},
-        {QStringLiteral("schemaVersion"), 9},
+        {QStringLiteral("schemaVersion"), 10},
         {QStringLiteral("request"), requestToJson(result.request)},
         {QStringLiteral("internalSize"), sizeToJson(result.grid)},
         {QStringLiteral("externalSize"), fullSizeToJson(result.grid)},
@@ -1361,7 +1369,8 @@ void MainWindow::replaceSelectedFuel(QListWidgetItem* item) {
     const ncfr::FuelSimulation sim = ncfr::simulateMixedFuel(trial);
     if (!ncfr::isFinalReactorValid(trial, trialRequest, sim)) {
         QMessageBox::warning(this, QString::fromUtf8("警告"),
-                             replacementFailureMessage(simulationFailureReason(trial, sim)));
+                             replacementFailureMessage(
+                                 simulationFailureReason(trialRequest, trial, sim)));
         return;
     }
 

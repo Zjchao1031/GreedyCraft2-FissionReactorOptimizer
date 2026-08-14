@@ -527,6 +527,20 @@ bool hasInvalidSinks(const Grid& grid, const FuelSimulation& sim) {
     return false;
 }
 
+long long overallCoolingMargin(const FuelSimulation& sim) {
+    return sim.cooling - sim.rawHeating;
+}
+
+bool hasOverallCoolingMargin(const FuelSimulation& sim) {
+    return overallCoolingMargin(sim) >= 0;
+}
+
+bool isOverallCoolingOperatingSimulation(const Grid& grid, const FuelSimulation& sim) {
+    return sim.runningCells == sim.fuelCells && sim.fuelCells > 0 &&
+           hasOverallCoolingMargin(sim) && sim.disconnectedFunctionalBlocks == 0 &&
+           hasSafeFuelFlux(grid, sim);
+}
+
 bool isSearchOperatingSimulation(const Grid& grid, const FuelSimulation& sim) {
     return sim.compatible && sim.minClusterMargin >= 0 && sim.disconnectedFunctionalBlocks == 0 &&
            hasSafeFuelFlux(grid, sim);

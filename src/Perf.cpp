@@ -229,7 +229,7 @@ void appendLatestLog(const BuildRequest& request, const OptimizationResult& resu
     os << "requestSources: " << requiredSourceCount(request) << '\n';
     os << "resultSize: " << result.grid.internalA() << "x" << result.grid.internalB() << "x"
        << result.grid.internalC() << '\n';
-    os << "resultMinCoolingMargin: " << result.minCoolingMargin << '\n';
+    os << "resultCoolingMargin: " << result.coolingMargin << '\n';
     os << "resultDisconnectedFunctionalBlocks: " << result.disconnectedFunctionalBlocks << '\n';
     writeCounters(os);
     writeCheckpoints(os);

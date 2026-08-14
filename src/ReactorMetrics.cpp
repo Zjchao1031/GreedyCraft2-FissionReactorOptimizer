@@ -33,7 +33,7 @@ double totalIrradiatorFlux(const FuelSimulation& simulation) {
 
 void updateResultMetrics(OptimizationResult& result,
                          const FuelSimulation& simulation) {
-    result.minCoolingMargin = simulation.minClusterMargin;
+    result.coolingMargin = overallCoolingMargin(simulation);
     result.usefulBlocks = countUsefulBlocks(result.grid);
     result.disconnectedFunctionalBlocks =
         simulation.disconnectedFunctionalBlocks;

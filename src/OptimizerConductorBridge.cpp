@@ -16,13 +16,25 @@ struct HeatingClusterInfo {
     std::vector<Pos> blocks;
 };
 
-bool canAttemptConductorBridge(const Grid& grid, const FuelSimulation& sim) {
+bool bridgeCoolingAccepted(
+    const FuelSimulation& sim,
+    ConductorBridgeCoolingPolicy coolingPolicy) {
+    if (coolingPolicy == ConductorBridgeCoolingPolicy::Overall) {
+        return hasOverallCoolingMargin(sim);
+    }
+    return sim.minClusterMargin >= 0;
+}
+
+bool canAttemptConductorBridge(
+    const Grid& grid, const FuelSimulation& sim,
+    ConductorBridgeCoolingPolicy coolingPolicy) {
     const bool hasMultipleHeatingClusters =
         std::count_if(sim.clusters.begin(), sim.clusters.end(),
                       [](const ClusterStats& cluster) {
                           return cluster.rawHeating > 0;
                       }) > 1;
-    return isPreCompactRunnable(sim) && hasSafeFuelFlux(grid, sim) && sim.minClusterMargin >= 0 &&
+    return isPreCompactRunnable(sim) && hasSafeFuelFlux(grid, sim) &&
+           bridgeCoolingAccepted(sim, coolingPolicy) &&
            (sim.disconnectedFunctionalBlocks != 0 || hasMultipleHeatingClusters);
 }
 
@@ -166,15 +178,19 @@ StateVector maskForClusterBlocks(const Grid& grid, const std::vector<HeatingClus
     return mask;
 }
 
-bool bridgeStillSafe(const Grid& grid, const FuelSimulation& sim) {
-    return isPreCompactRunnable(sim) && hasSafeFuelFlux(grid, sim) && sim.minClusterMargin >= 0;
+bool bridgeStillSafe(
+    const Grid& grid, const FuelSimulation& sim,
+    ConductorBridgeCoolingPolicy coolingPolicy) {
+    return isPreCompactRunnable(sim) && hasSafeFuelFlux(grid, sim) &&
+           bridgeCoolingAccepted(sim, coolingPolicy);
 }
 
 ConductorBridgeResult connectHeatingClustersWithConductors(Grid grid, const FuelSimulation& initialSim,
                                                            const StateVector* protectedPositions,
-                                                           const std::atomic_bool* cancelRequested) {
+                                                           const std::atomic_bool* cancelRequested,
+                                                           ConductorBridgeCoolingPolicy coolingPolicy) {
     ConductorBridgeResult result{grid, initialSim, false, false, 0, 0, ""};
-    if (!canAttemptConductorBridge(grid, initialSim)) {
+    if (!canAttemptConductorBridge(grid, initialSim, coolingPolicy)) {
         result.reason = "notNeeded";
         return result;
     }
@@ -208,7 +224,7 @@ ConductorBridgeResult connectHeatingClustersWithConductors(Grid grid, const Fuel
         Grid trial = grid;
         const int added = placeConductorsOnPath(trial, *path, targetMask, initialSim.heatingClusterBlocks);
         FuelSimulation trialSim = simulateMixedFuel(trial);
-        if (!bridgeStillSafe(trial, trialSim)) {
+        if (!bridgeStillSafe(trial, trialSim, coolingPolicy)) {
             result.reason = "clusterPathUnsafe";
             return result;
         }
@@ -220,18 +236,27 @@ ConductorBridgeResult connectHeatingClustersWithConductors(Grid grid, const Fuel
 
     result.grid = std::move(grid);
     result.sim = simulateMixedFuel(result.grid);
-    result.success = isSearchAccepted(result.grid, result.sim);
+    result.success =
+        coolingPolicy == ConductorBridgeCoolingPolicy::Overall
+            ? isOverallCoolingOperatingSimulation(result.grid, result.sim)
+            : isSearchAccepted(result.grid, result.sim);
     result.reason = result.success ? "success" : "finalNotAccepted";
     return result;
 }
 
 #ifndef NDEBUG
 void logConductorBridgeCheckpoint(const char* reason, const Grid& grid, const FuelSimulation& sim,
-                                  int clusterCount, int conductorsAdded) {
+                                  int clusterCount, int conductorsAdded,
+                                  ConductorBridgeCoolingPolicy coolingPolicy) {
     std::ostringstream os;
     os << "reason=" << reason
        << " grid=" << gridInteriorLabel(grid)
+       << " coolingPolicy="
+       << (coolingPolicy == ConductorBridgeCoolingPolicy::Overall
+               ? "overall"
+               : "perCluster")
        << " compatible=" << (sim.compatible ? 1 : 0)
+       << " coolingMargin=" << overallCoolingMargin(sim)
        << " minMargin=" << sim.minClusterMargin
        << " disconnected=" << sim.disconnectedFunctionalBlocks
        << " clusters=" << clusterCount

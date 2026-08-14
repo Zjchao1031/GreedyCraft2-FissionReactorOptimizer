@@ -811,12 +811,18 @@ bool isFinalReactorValidInternal(const Grid& grid, const BuildRequest& request,
         grid.internalA() >= 1 && grid.internalA() <= kMaxSize &&
         grid.internalB() >= 1 && grid.internalB() <= kMaxSize &&
         grid.internalC() >= 1 && grid.internalC() <= kMaxSize;
+    const bool usesOverallCooling = request.fuelIndices.size() == 5;
+    const bool operating = usesOverallCooling
+        ? isOverallCoolingOperatingSimulation(grid, sim) &&
+              !hasInvalidSinks(grid, sim) &&
+              evaluateHeatingClusterWallConnections(grid, sim).allConnected()
+        : isSafeOperatingSimulation(grid, sim);
     return sizeValid && hasNoEmptyInteriorPlane(grid) &&
            hasRequiredFuelCells(grid, request) &&
            hasRequiredIrradiator(grid, request, sim) &&
            hasRequiredSources(grid, request) &&
            hasRequiredBoundaryParts(grid, request.fuelIndices) &&
-           isSafeOperatingSimulation(grid, sim);
+           operating;
 }
 
 bool hasNoEmptyInteriorPlane(const Grid& grid) {
@@ -1269,7 +1275,10 @@ OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, 
     const bool boundaryPartsValid =
         hasRequiredBoundaryParts(finalGrid, request.fuelIndices);
     const bool noEmptyPlane = hasNoEmptyInteriorPlane(finalGrid);
-    const bool searchAccepted = isSearchOperatingSimulation(finalGrid, finalSim);
+    const bool usesOverallCooling = request.fuelIndices.size() == 5;
+    const bool searchAccepted = usesOverallCooling
+        ? isOverallCoolingOperatingSimulation(finalGrid, finalSim)
+        : isSearchOperatingSimulation(finalGrid, finalSim);
     const bool sinksValid = !hasInvalidSinks(finalGrid, finalSim);
     const WallConnectionResult wall =
         evaluateHeatingClusterWallConnections(finalGrid, finalSim);
@@ -1281,6 +1290,8 @@ OptimizationResult resultFromSimulation(Grid grid, const BuildRequest& request, 
         detail << "grid=" << gridInteriorLabel(finalGrid)
                << " accepted=" << (finalValid ? 1 : 0)
                << " compatible=" << (finalSim.compatible ? 1 : 0)
+               << " coolingRule=" << (usesOverallCooling ? "overall" : "cluster")
+               << " coolingMargin=" << overallCoolingMargin(finalSim)
                << " minMargin=" << finalSim.minClusterMargin
                << " disconnected=" << finalSim.disconnectedFunctionalBlocks
                << " heatingClusters=" << wall.heatingClusters
