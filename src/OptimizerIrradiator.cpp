@@ -1,13 +1,15 @@
 #include "OptimizerIrradiator.h"
 
 #include "OptimizerCommon.h"
+#include "OptimizerConductorBridge.h"
 #include "OptimizerCooling.h"
 #include "OptimizerDiagnostics.h"
 #include "OptimizerDirectional.h"
+#include "OptimizerSpecialCooling.h"
+#include "FuelSpecialCases.h"
 #include "NeutronRules.h"
 #include "Perf.h"
 
-#include <array>
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -24,11 +26,13 @@ constexpr int kIrradiatorInteriorSize = kMaxSize;
 constexpr int kIrradiatorCenter = 12;
 constexpr int kIrradiatorFuelInputCount = 5;
 constexpr int kIrradiatorFuelDistance = kMaxIrradiatorLineModerators + 1;
+constexpr int kIrradiatorAboveDirectionIndex = 2;
+constexpr int kIrradiatorReservedDirectionIndex = 3;
 constexpr int kAnySource = -1;
 constexpr double kActivationFluxEpsilon = 1e-9;
 constexpr ImproveOptions kIrradiatorImproveOptions{1, 1, 64};
 constexpr CoolingExpansionOptions kIrradiatorCoolingExpansionOptions{12, 2, 192, 3, 192, 64, 64, 3};
-constexpr Direction kIrradiatorWallBridgeDirection{0, 0, -1};
+constexpr Direction kIrradiatorReservedDirection{0, -1, 0};
 
 struct FixedBlock {
     Pos pos;
@@ -57,6 +61,7 @@ struct ActivationSearchContext {
 struct FixedIrradiatorSkeleton {
     std::vector<FixedBlock> fixedInterior;
     std::vector<Pos> fuelPositions;
+    std::vector<int> fuelRequestSlots;
     std::vector<ActivationPlan> activations;
     std::vector<Pos> sourcePositions;
     std::vector<Pos> sourceTargets;
@@ -130,9 +135,9 @@ bool sameDirection(const Direction& lhs, const Direction& rhs) {
     return lhs.dx == rhs.dx && lhs.dy == rhs.dy && lhs.dz == rhs.dz;
 }
 
-bool isIrradiatorWallBridgeDirection(int directionIndex) {
+bool isIrradiatorReservedDirection(int directionIndex) {
     return sameDirection(kSourceDirections.at(static_cast<size_t>(directionIndex)),
-                         kIrradiatorWallBridgeDirection);
+                         kIrradiatorReservedDirection);
 }
 
 bool isFixedInteriorPosition(const FixedIrradiatorSkeleton& skeleton, const Pos& pos) {
@@ -211,24 +216,6 @@ bool addFixedBlock(FixedIrradiatorSkeleton& skeleton, const Pos& pos, const Bloc
     }
     skeleton.fixedInterior.push_back({pos, block});
     return true;
-}
-
-void addWallConnectionChain(FixedIrradiatorSkeleton& skeleton, const Pos& fuelPos, const Direction& outwardDir,
-                            int directionIndex) {
-    const Direction& perpendicular =
-        kSourceDirections.at(static_cast<size_t>(wallConnectionPerpendicularDirectionIndex(directionIndex)));
-    const std::array<std::pair<Pos, Block>, 4> chain = {{
-        {offset(fuelPos, perpendicular, 1), {BlockKind::Conductor, -1}},
-        {offset(offset(fuelPos, outwardDir, 1), perpendicular, 1), {BlockKind::Conductor, -1}},
-        {offset(offset(fuelPos, outwardDir, 2), perpendicular, 1), {BlockKind::Conductor, -1}},
-        {offset(offset(fuelPos, outwardDir, 3), perpendicular, 1), {BlockKind::Conductor, -1}},
-    }};
-
-    for (const auto& [pos, block] : chain) {
-        if (!addFixedBlock(skeleton, pos, block)) {
-            throw std::runtime_error("燃料到外壳的固定导体连接链发生方块冲突。");
-        }
-    }
 }
 
 double reflectedFluxForActivationLine(const Fuel& fuel, const std::vector<int>& moderatorTypeIndices,
@@ -317,40 +304,13 @@ int activationModeratorCount(const ActivationPlan& plan) {
     return count;
 }
 
-bool activationLineKeyLess(const ActivationLine& lhs, const ActivationLine& rhs) {
-    if (lhs.directionIndex != rhs.directionIndex) {
-        return lhs.directionIndex < rhs.directionIndex;
-    }
-    if (lhs.moderatorTypes.size() != rhs.moderatorTypes.size()) {
-        return lhs.moderatorTypes.size() < rhs.moderatorTypes.size();
-    }
-    if (lhs.moderatorTypes != rhs.moderatorTypes) {
-        return lhs.moderatorTypes < rhs.moderatorTypes;
-    }
-    if (lhs.reflectorType != rhs.reflectorType) {
-        return lhs.reflectorType < rhs.reflectorType;
-    }
-    return lhs.reflectedFlux < rhs.reflectedFlux;
-}
-
-bool activationPlanKeyLess(const ActivationPlan& lhs, const ActivationPlan& rhs) {
-    return std::lexicographical_compare(lhs.lines.begin(), lhs.lines.end(), rhs.lines.begin(), rhs.lines.end(),
-                                        activationLineKeyLess);
-}
-
 bool betterActivationPlan(const ActivationPlan& candidate, const ActivationPlan& best) {
     if (candidate.lines.size() != best.lines.size()) {
         return candidate.lines.size() < best.lines.size();
     }
-    if (candidate.reflectedFlux != best.reflectedFlux) {
-        return candidate.reflectedFlux < best.reflectedFlux;
-    }
     const int candidateModeratorCount = activationModeratorCount(candidate);
     const int bestModeratorCount = activationModeratorCount(best);
-    if (candidateModeratorCount != bestModeratorCount) {
-        return candidateModeratorCount < bestModeratorCount;
-    }
-    return activationPlanKeyLess(candidate, best);
+    return candidateModeratorCount > bestModeratorCount;
 }
 
 bool partialActivationPlanCannotBeatBest(const ActivationPlan& current, const ActivationPlan& best) {
@@ -360,14 +320,7 @@ bool partialActivationPlanCannotBeatBest(const ActivationPlan& current, const Ac
     if (current.lines.size() < best.lines.size()) {
         return false;
     }
-    if (current.reflectedFlux > best.reflectedFlux + kActivationFluxEpsilon) {
-        return true;
-    }
-    if (std::abs(current.reflectedFlux - best.reflectedFlux) <= kActivationFluxEpsilon &&
-        activationModeratorCount(current) > activationModeratorCount(best)) {
-        return true;
-    }
-    return false;
+    return activationModeratorCount(current) <= activationModeratorCount(best);
 }
 
 ActivationSearchContext makeActivationSearchContext(const Fuel& fuel, int fuelDirectionIndex,
@@ -455,6 +408,37 @@ std::optional<ActivationPlan> chooseActivationPlanForFuel(int fuelIndex, int fue
     std::optional<ActivationPlan> best;
     chooseActivationPlanRecursive(search, 0, current, best);
     return best;
+}
+
+std::vector<int> irradiatorFuelRequestSlots(const BuildRequest& request) {
+    int highestHeatSlot = 0;
+    for (int slot = 1; slot < static_cast<int>(request.fuelIndices.size()); ++slot) {
+        const Fuel& candidate = fuels().at(static_cast<size_t>(request.fuelIndices.at(static_cast<size_t>(slot))));
+        const Fuel& currentHighest =
+            fuels().at(static_cast<size_t>(request.fuelIndices.at(static_cast<size_t>(highestHeatSlot))));
+        if (candidate.heat > currentHighest.heat) {
+            highestHeatSlot = slot;
+        }
+    }
+
+    std::vector<int> requestSlots(kSourceDirections.size(), -1);
+    requestSlots.at(kIrradiatorAboveDirectionIndex) = highestHeatSlot;
+    int remainingDirectionIndex = 0;
+    for (int slot = 0; slot < static_cast<int>(request.fuelIndices.size()); ++slot) {
+        if (slot == highestHeatSlot) {
+            continue;
+        }
+        while (remainingDirectionIndex == kIrradiatorAboveDirectionIndex ||
+               remainingDirectionIndex == kIrradiatorReservedDirectionIndex) {
+            ++remainingDirectionIndex;
+        }
+        requestSlots.at(static_cast<size_t>(remainingDirectionIndex++)) = slot;
+    }
+    return requestSlots;
+}
+
+int irradiatorFuelRequestSlot(const FixedIrradiatorSkeleton& skeleton, int directionIndex) {
+    return skeleton.fuelRequestSlots.at(static_cast<size_t>(directionIndex));
 }
 
 bool restoreFixedIrradiatorSkeleton(Grid& grid, const FixedIrradiatorSkeleton& skeleton) {
@@ -548,15 +532,13 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
     }
 
     skeleton.fuelPositions.resize(kSourceDirections.size());
+    skeleton.fuelRequestSlots.assign(kSourceDirections.size(), -1);
     skeleton.activations.resize(kSourceDirections.size());
-    size_t fuelInputIndex = 0;
+    const std::vector<int> fuelRequestSlots = irradiatorFuelRequestSlots(request);
     for (int directionIndex = 0; directionIndex < static_cast<int>(kSourceDirections.size()); ++directionIndex) {
         throwIfCancelled(cancelRequested);
         const Direction& dir = kSourceDirections.at(static_cast<size_t>(directionIndex));
-        if (isIrradiatorWallBridgeDirection(directionIndex)) {
-            if (!addFixedBlock(skeleton, offset(center, dir, 1), {BlockKind::Conductor, -1})) {
-                throw std::runtime_error("中心辐照仓导体连接骨架发生方块冲突。");
-            }
+        if (isIrradiatorReservedDirection(directionIndex)) {
             continue;
         }
 
@@ -567,7 +549,9 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
             }
         }
 
-        const int fuelIndex = request.fuelIndices.at(fuelInputIndex++);
+        const int requestSlot = fuelRequestSlots.at(static_cast<size_t>(directionIndex));
+        const int fuelIndex = request.fuelIndices.at(static_cast<size_t>(requestSlot));
+        skeleton.fuelRequestSlots.at(static_cast<size_t>(directionIndex)) = requestSlot;
         const Pos fuelPos = offset(center, dir, kIrradiatorFuelDistance);
         skeleton.fuelPositions.at(static_cast<size_t>(directionIndex)) = fuelPos;
         if (!addFixedBlock(skeleton, fuelPos, {BlockKind::FuelCell, fuelIndex})) {
@@ -604,7 +588,6 @@ FixedIrradiatorSkeleton buildBaseSkeleton(const BuildRequest& request, const std
                 throw std::runtime_error("燃料外侧动态维持临界反射器发生方块冲突。");
             }
         }
-        addWallConnectionChain(skeleton, fuelPos, dir, directionIndex);
     }
 
     return skeleton;
@@ -616,13 +599,13 @@ Grid buildIrradiatorSkeletonGrid(const BuildRequest& request, FixedIrradiatorSke
         throw std::runtime_error("无法恢复中心辐照仓固定骨架。");
     }
 
-    size_t fuelInputIndex = 0;
     for (int directionIndex = 0; directionIndex < static_cast<int>(kSourceDirections.size()); ++directionIndex) {
-        if (isIrradiatorWallBridgeDirection(directionIndex)) {
+        if (isIrradiatorReservedDirection(directionIndex)) {
             continue;
         }
 
-        const int fuelIndex = request.fuelIndices.at(fuelInputIndex++);
+        const int requestSlot = irradiatorFuelRequestSlot(skeleton, directionIndex);
+        const int fuelIndex = request.fuelIndices.at(static_cast<size_t>(requestSlot));
         const Fuel& fuel = fuels().at(static_cast<size_t>(fuelIndex));
         if (fuel.selfPriming) {
             continue;
@@ -648,7 +631,7 @@ Grid buildIrradiatorSkeletonGrid(const BuildRequest& request, FixedIrradiatorSke
     return grid;
 }
 
-void requireSixFuelIrradiatorState(const Grid& grid, const FuelSimulation& sim, const char* stage) {
+void requireFiveFuelIrradiatorState(const Grid& grid, const FuelSimulation& sim, const char* stage) {
     if (!isPreCompactRunnable(sim)) {
         std::ostringstream os;
         os << "中心辐照仓方案在 " << stage << " 阶段无法让 " << kIrradiatorFuelInputCount
@@ -668,7 +651,7 @@ void requireSixFuelIrradiatorState(const Grid& grid, const FuelSimulation& sim, 
     }
 }
 
-bool isAcceptedSixFuelIrradiator(const Grid& grid, const FuelSimulation& sim) {
+bool isAcceptedFiveFuelIrradiator(const Grid& grid, const FuelSimulation& sim) {
     return isSearchOperatingSimulation(grid, sim) && countFunctionalIrradiators(sim) == 1;
 }
 
@@ -690,10 +673,171 @@ Grid expandIrradiatorCooling(Grid grid, const FixedIrradiatorSkeleton& skeleton,
         cancelRequested, kIrradiatorCoolingExpansionOptions);
 }
 
+FuelLineSpec specialCoolingFuelLine(const ActivationLine& line) {
+    return {
+        line.directionIndex,
+        static_cast<int>(line.moderatorTypes.size()),
+        line.moderatorTypes.front(),
+        line.reflectorType,
+        line.reflectedFlux,
+    };
+}
+
+bool isBetterSpecialCoolingAnchor(const FuelLineSpec& candidate,
+                                  size_t candidateEmptyPositions,
+                                  const FuelLineSpec& current,
+                                  size_t currentEmptyPositions) {
+    if (candidateEmptyPositions != currentEmptyPositions) {
+        return candidateEmptyPositions > currentEmptyPositions;
+    }
+    if (candidate.moderatorCount != current.moderatorCount) {
+        return candidate.moderatorCount < current.moderatorCount;
+    }
+    if (candidate.direction != current.direction) {
+        return candidate.direction < current.direction;
+    }
+    return candidate.reflectorType < current.reflectorType;
+}
+
+std::vector<FuelLayoutContext> irradiatorSpecialCoolingContexts(
+    const Grid& grid, const FixedIrradiatorSkeleton& skeleton) {
+    std::vector<FuelLayoutContext> contexts;
+    contexts.reserve(kIrradiatorFuelInputCount);
+
+    for (int directionIndex = 0;
+         directionIndex < static_cast<int>(kSourceDirections.size());
+         ++directionIndex) {
+        if (isIrradiatorReservedDirection(directionIndex)) {
+            continue;
+        }
+
+        const Pos fuelPos =
+            skeleton.fuelPositions.at(static_cast<size_t>(directionIndex));
+        const ActivationPlan& activation =
+            skeleton.activations.at(static_cast<size_t>(directionIndex));
+        std::optional<FuelLineSpec> bestLine;
+        size_t bestEmptyPositions = 0;
+        for (const ActivationLine& line : activation.lines) {
+            if (line.moderatorTypes.empty()) {
+                continue;
+            }
+            const FuelLineSpec candidate = specialCoolingFuelLine(line);
+            const auto endStoneCandidates =
+                endStoneReflectorSinkCandidates(
+                    grid, fuelPos, {candidate});
+            if (!endStoneCandidates.has_value()) {
+                continue;
+            }
+            const size_t emptyPositions = static_cast<size_t>(
+                std::count_if(
+                    endStoneCandidates->begin(),
+                    endStoneCandidates->end(),
+                    [&](const EndStoneReflectorCandidate& value) {
+                        return grid.at(
+                                   value.pos.x, value.pos.y,
+                                   value.pos.z).kind ==
+                               BlockKind::Empty;
+                    }));
+            if (!bestLine.has_value() ||
+                isBetterSpecialCoolingAnchor(
+                    candidate, emptyPositions, *bestLine,
+                    bestEmptyPositions)) {
+                bestLine = candidate;
+                bestEmptyPositions = emptyPositions;
+            }
+        }
+
+        FuelLayoutContext context;
+        context.requestSlot =
+            irradiatorFuelRequestSlot(skeleton, directionIndex);
+        context.fuelPos = fuelPos;
+        if (bestLine.has_value()) {
+            context.fuelLines.push_back(*bestLine);
+        }
+        contexts.push_back(std::move(context));
+    }
+    return contexts;
+}
+
+#ifndef NDEBUG
+void logIrradiatorSpecialCoolingCheckpoint(
+    const char* stage, const char* outcome, const Grid& grid,
+    const FuelSimulation& sim, long long deficit) {
+    std::ostringstream os;
+    os << "stage=" << stage
+       << " outcome=" << outcome
+       << " grid=" << gridInteriorLabel(grid)
+       << " rawHeating=" << sim.rawHeating
+       << " cooling=" << sim.cooling
+       << " deficit=" << deficit
+       << " minMargin=" << sim.minClusterMargin
+       << " disconnected=" << sim.disconnectedFunctionalBlocks;
+    NCFR_PERF_CHECKPOINT("irradiatorSpecialCooling", os.str().c_str());
+}
+#endif
+
+std::optional<Grid> tryIrradiatorSpecialCoolingFallback(
+    const Grid& grid, const FuelSimulation& sim,
+    const FixedIrradiatorSkeleton& skeleton,
+    const BuildRequest& request, const char* stage,
+    const std::atomic_bool* cancelRequested) {
+    const long long deficit = sim.rawHeating - sim.cooling;
+    const MixedFuelSpecialCoolingLimits limits =
+        mixedFuelSpecialCoolingLimits(kIrradiatorFuelInputCount);
+    if (!isPreCompactRunnable(sim) ||
+        !hasSafeFuelFlux(grid, sim) ||
+        hasInvalidSinks(grid, sim) ||
+        deficit <= 0 ||
+        deficit > limits.manaDustDeficitLimit) {
+#ifndef NDEBUG
+        logIrradiatorSpecialCoolingCheckpoint(
+            stage, "skipped", grid, sim, deficit);
+#endif
+        return std::nullopt;
+    }
+
+    const std::vector<FuelLayoutContext> contexts =
+        irradiatorSpecialCoolingContexts(grid, skeleton);
+#ifndef NDEBUG
+    logIrradiatorSpecialCoolingCheckpoint(
+        stage, "attempt", grid, sim, deficit);
+#endif
+    std::optional<Grid> special =
+        tryMixedFuelSpecialCoolingFallback(
+            grid, request, contexts, cancelRequested, true);
+    if (!special.has_value()) {
+#ifndef NDEBUG
+        logIrradiatorSpecialCoolingCheckpoint(
+            stage, "rejected", grid, sim, deficit);
+#endif
+        return std::nullopt;
+    }
+
+    const FuelSimulation specialSim = simulateMixedFuel(*special);
+    if (!isPreCompactRunnable(specialSim) ||
+        !hasSafeFuelFlux(*special, specialSim) ||
+        !specialSim.compatible ||
+        specialSim.minClusterMargin < 0 ||
+        hasInvalidSinks(*special, specialSim)) {
+#ifndef NDEBUG
+        logIrradiatorSpecialCoolingCheckpoint(
+            stage, "invalidResult", *special, specialSim,
+            specialSim.rawHeating - specialSim.cooling);
+#endif
+        return std::nullopt;
+    }
+#ifndef NDEBUG
+    logIrradiatorSpecialCoolingCheckpoint(
+        stage, "accepted", *special, specialSim,
+        specialSim.rawHeating - specialSim.cooling);
+#endif
+    return special;
+}
+
 } // namespace
 
-OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
-                                                   const std::atomic_bool* cancelRequested) {
+OptimizationResult optimizeFiveFuelIrradiatorLayout(const BuildRequest& request,
+                                                    const std::atomic_bool* cancelRequested) {
     NCFR_PERF_COUNT(finalizeCandidateCalls);
     throwIfCancelled(cancelRequested);
     const SupportBlockOptions supportOptions{
@@ -704,7 +848,7 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
     Grid grid = buildIrradiatorSkeletonGrid(request, skeleton);
 
     FuelSimulation sim = simulateMixedFuel(grid);
-    requireSixFuelIrradiatorState(grid, sim, "初始骨架");
+    requireFiveFuelIrradiatorState(grid, sim, "初始骨架");
 
     fillSupportBlocks(grid, &supportOptions);
     if (!restoreFixedIrradiatorSkeleton(grid, skeleton)) {
@@ -715,12 +859,25 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
         throw std::runtime_error("清理无效支撑块后无法恢复中心辐照仓固定骨架。");
     }
     sim = simulateMixedFuel(grid);
-    requireSixFuelIrradiatorState(grid, sim, "基础支撑剪枝后");
-    if (isAcceptedSixFuelIrradiator(grid, sim)) {
+    requireFiveFuelIrradiatorState(grid, sim, "基础支撑剪枝后");
+    if (isAcceptedFiveFuelIrradiator(grid, sim) &&
+        evaluateHeatingClusterWallConnections(grid, sim).allConnected()) {
         return resultFromSimulation(std::move(grid), request, sim);
     }
 
-    if (!sim.compatible || sim.minClusterMargin < 0 || sim.disconnectedFunctionalBlocks != 0) {
+    bool specialCoolingApplied = false;
+    if (std::optional<Grid> special =
+            tryIrradiatorSpecialCoolingFallback(
+                grid, sim, skeleton, request, "baseSupport",
+                cancelRequested)) {
+        grid = std::move(*special);
+        sim = simulateMixedFuel(grid);
+        specialCoolingApplied = true;
+    }
+
+    if (!specialCoolingApplied &&
+        (!sim.compatible || sim.minClusterMargin < 0 ||
+         sim.disconnectedFunctionalBlocks != 0)) {
         if (!sim.compatible || sim.disconnectedFunctionalBlocks != 0) {
             clearMutableSupport(grid, skeleton);
             if (!restoreFixedIrradiatorSkeleton(grid, skeleton)) {
@@ -738,7 +895,19 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
         sim = simulateMixedFuel(grid);
     }
 
-    if (!isAcceptedSixFuelIrradiator(grid, sim)) {
+    if (!specialCoolingApplied) {
+        if (std::optional<Grid> special =
+                tryIrradiatorSpecialCoolingFallback(
+                    grid, sim, skeleton, request, "afterCoolingExpansion",
+                    cancelRequested)) {
+            grid = std::move(*special);
+            sim = simulateMixedFuel(grid);
+            specialCoolingApplied = true;
+        }
+    }
+
+    if (!specialCoolingApplied &&
+        !isAcceptedFiveFuelIrradiator(grid, sim)) {
         grid = improveSupportBlocks(std::move(grid), cancelRequested, kIrradiatorImproveOptions,
                                     &supportOptions);
         if (!restoreFixedIrradiatorSkeleton(grid, skeleton)) {
@@ -749,9 +918,9 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
             throw std::runtime_error("小范围优化清理后无法恢复中心辐照仓固定骨架。");
         }
         sim = simulateMixedFuel(grid);
-        requireSixFuelIrradiatorState(grid, sim, "小范围支撑优化后");
+        requireFiveFuelIrradiatorState(grid, sim, "小范围支撑优化后");
 
-        if (!isAcceptedSixFuelIrradiator(grid, sim)) {
+        if (!isAcceptedFiveFuelIrradiator(grid, sim)) {
             grid = expandIrradiatorCooling(std::move(grid), skeleton, cancelRequested);
             if (!restoreFixedIrradiatorSkeleton(grid, skeleton)) {
                 throw std::runtime_error("补救扩展散热器后无法恢复中心辐照仓固定骨架。");
@@ -764,10 +933,38 @@ OptimizationResult optimizeSixFuelIrradiatorLayout(const BuildRequest& request,
         }
     }
 
-    requireSixFuelIrradiatorState(grid, sim, "最终验证");
-    if (!isAcceptedSixFuelIrradiator(grid, sim)) {
+    if (!specialCoolingApplied) {
+        if (std::optional<Grid> special =
+                tryIrradiatorSpecialCoolingFallback(
+                    grid, sim, skeleton, request, "afterSupportRecovery",
+                    cancelRequested)) {
+            grid = std::move(*special);
+            sim = simulateMixedFuel(grid);
+            specialCoolingApplied = true;
+        }
+    }
+
+    requireFiveFuelIrradiatorState(grid, sim, "导体桥接前");
+    grid = compactEmptyInteriorPlanes(std::move(grid));
+    sim = simulateMixedFuel(grid);
+    const StateVector protectedPositions = protectFuelLineBlocks(grid);
+    if (canAttemptConductorBridge(grid, sim)) {
+        ConductorBridgeResult bridge =
+            connectHeatingClustersWithConductors(
+                grid, sim, &protectedPositions, cancelRequested);
+        if (!bridge.success) {
+            std::ostringstream os;
+            os << "中心辐照仓导体桥接失败：" << bridge.reason << "。";
+            throw std::runtime_error(os.str());
+        }
+        grid = std::move(bridge.grid);
+        sim = std::move(bridge.sim);
+    }
+
+    requireFiveFuelIrradiatorState(grid, sim, "最终验证");
+    if (!isAcceptedFiveFuelIrradiator(grid, sim)) {
         std::ostringstream os;
-        os << "无法在中心辐照仓固定骨架周围放置足够散热器；最小散热余量 "
+        os << "无法在中心辐照仓周围放置足够散热器或连接功能热簇；最小散热余量 "
            << sim.minClusterMargin << " H/t，断开功能块 " << sim.disconnectedFunctionalBlocks << "。";
         throw std::runtime_error(os.str());
     }

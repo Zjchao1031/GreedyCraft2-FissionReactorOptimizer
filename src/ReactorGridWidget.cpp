@@ -19,7 +19,7 @@ bool isDark(const QColor& color) {
 }
 
 QString coordinateLabel(int value, QChar axis) {
-    return QString("%1=%2").arg(axis).arg(value);
+    return QString("%1=%2").arg(axis).arg(value + 1);
 }
 
 class StableBackgroundDelegate : public QStyledItemDelegate {
@@ -82,15 +82,15 @@ void ReactorGridWidget::mouseReleaseEvent(QMouseEvent* event) {
     clearSelection();
     setCurrentIndex(QModelIndex());
     if (event->button() == Qt::LeftButton && grid_ != nullptr &&
-        layer_ >= 0 && layer_ < grid_->depth()) {
+        layer_ >= 0 && layer_ < grid_->height()) {
         const QModelIndex clicked = indexAt(event->pos());
         if (clicked.isValid()) {
             const int x = clicked.column();
-            const int y = clicked.row();
-            if (grid_->inBounds(x, y, layer_)) {
-                const ncfr::Block& block = grid_->at(x, y, layer_);
+            const int z = clicked.row();
+            if (grid_->inBounds(x, layer_, z)) {
+                const ncfr::Block& block = grid_->at(x, layer_, z);
                 if (block.kind == ncfr::BlockKind::FuelCell) {
-                    emit fuelCellClicked(x, y, layer_, grid_->index(x, y, layer_));
+                    emit fuelCellClicked(x, layer_, z, grid_->index(x, layer_, z));
                 }
             }
         }
@@ -143,13 +143,13 @@ QColor ReactorGridWidget::colorForKind(ncfr::BlockKind kind) {
 void ReactorGridWidget::refresh() {
     clear();
 
-    if (grid_ == nullptr || layer_ < 0 || layer_ >= grid_->depth()) {
+    if (grid_ == nullptr || layer_ < 0 || layer_ >= grid_->height()) {
         setRowCount(0);
         setColumnCount(0);
         return;
     }
 
-    setRowCount(grid_->height());
+    setRowCount(grid_->depth());
     setColumnCount(grid_->width());
 
     QStringList horizontalLabels;
@@ -160,15 +160,15 @@ void ReactorGridWidget::refresh() {
     setHorizontalHeaderLabels(horizontalLabels);
 
     QStringList verticalLabels;
-    verticalLabels.reserve(grid_->height());
-    for (int y = 0; y < grid_->height(); ++y) {
-        verticalLabels << coordinateLabel(y, QChar('z'));
+    verticalLabels.reserve(grid_->depth());
+    for (int z = 0; z < grid_->depth(); ++z) {
+        verticalLabels << coordinateLabel(z, QChar('z'));
     }
     setVerticalHeaderLabels(verticalLabels);
 
-    for (int y = 0; y < grid_->height(); ++y) {
+    for (int z = 0; z < grid_->depth(); ++z) {
         for (int x = 0; x < grid_->width(); ++x) {
-            const ncfr::Block& block = grid_->at(x, y, layer_);
+            const ncfr::Block& block = grid_->at(x, layer_, z);
             const QColor background = colorForBlock(block);
             auto* item = new QTableWidgetItem(shortNameForBlock(block));
             item->setFlags(Qt::ItemIsEnabled);
@@ -176,11 +176,11 @@ void ReactorGridWidget::refresh() {
             item->setBackground(QBrush(background));
             item->setForeground(QBrush(isDark(background) ? Qt::white : Qt::black));
             item->setToolTip(QString::fromUtf8("坐标: x=%1, y=%2, z=%3\n方块: %4")
-                                 .arg(x)
+                                 .arg(x + 1)
                                  .arg(layer_ + 1)
-                                 .arg(y)
+                                 .arg(z + 1)
                                  .arg(QString::fromStdString(ncfr::blockDisplayName(block))));
-            setItem(y, x, item);
+            setItem(z, x, item);
         }
     }
 }

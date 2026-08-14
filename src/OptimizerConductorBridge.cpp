@@ -17,8 +17,13 @@ struct HeatingClusterInfo {
 };
 
 bool canAttemptConductorBridge(const Grid& grid, const FuelSimulation& sim) {
+    const bool hasMultipleHeatingClusters =
+        std::count_if(sim.clusters.begin(), sim.clusters.end(),
+                      [](const ClusterStats& cluster) {
+                          return cluster.rawHeating > 0;
+                      }) > 1;
     return isPreCompactRunnable(sim) && hasSafeFuelFlux(grid, sim) && sim.minClusterMargin >= 0 &&
-           sim.disconnectedFunctionalBlocks != 0;
+           (sim.disconnectedFunctionalBlocks != 0 || hasMultipleHeatingClusters);
 }
 
 std::vector<HeatingClusterInfo> heatingClusters(const Grid& grid, const FuelSimulation& sim) {

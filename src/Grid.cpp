@@ -101,10 +101,10 @@ Grid makeShell(int a, int b, int c) {
 
     grid.at(0, 1, 1) = {BlockKind::Controller, -1};
     if (grid.width() > 2) {
-        grid.at(1, 0, 1) = {BlockKind::VentIn, -1};
+        grid.at(1, 1, 0) = {BlockKind::VentIn, -1};
     }
-    if (grid.width() > 2 && grid.height() > 2) {
-        grid.at(grid.width() - 2, grid.height() - 1, 1) = {BlockKind::VentOut, -1};
+    if (grid.width() > 2 && grid.depth() > 2) {
+        grid.at(grid.width() - 2, 1, grid.depth() - 1) = {BlockKind::VentOut, -1};
     }
     return grid;
 }

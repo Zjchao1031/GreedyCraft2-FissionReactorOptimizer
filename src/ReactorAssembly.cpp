@@ -59,22 +59,22 @@ std::vector<Pos> fuelCellPortPositions(const Grid& grid) {
             }
         };
 
-    for (int z = 1; z < grid.depth() - 1; ++z) {
-        for (int y = 1; y < grid.height() - 1; ++y) {
+    for (int y = 1; y < grid.height() - 1; ++y) {
+        for (int z = 1; z < grid.depth() - 1; ++z) {
             appendIfCasing(0, y, z);
             appendIfCasing(grid.width() - 1, y, z);
-        }
-    }
-    for (int z = 1; z < grid.depth() - 1; ++z) {
-        for (int x = 1; x < grid.width() - 1; ++x) {
-            appendIfCasing(x, 0, z);
-            appendIfCasing(x, grid.height() - 1, z);
         }
     }
     for (int y = 1; y < grid.height() - 1; ++y) {
         for (int x = 1; x < grid.width() - 1; ++x) {
             appendIfCasing(x, y, 0);
             appendIfCasing(x, y, grid.depth() - 1);
+        }
+    }
+    for (int z = 1; z < grid.depth() - 1; ++z) {
+        for (int x = 1; x < grid.width() - 1; ++x) {
+            appendIfCasing(x, 0, z);
+            appendIfCasing(x, grid.height() - 1, z);
         }
     }
     return positions;

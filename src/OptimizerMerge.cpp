@@ -1339,21 +1339,6 @@ bool protectedLayoutPreserved(
     return true;
 }
 
-StateVector protectQuadFuelLines(const Grid& grid) {
-    StateVector protectedPositions(
-        static_cast<size_t>(grid.volume()), false);
-    for (const Pos& pos : grid.interiorPositions()) {
-        const int idx = grid.index(pos.x, pos.y, pos.z);
-        const BlockKind kind = grid.atIndex(idx).kind;
-        if (kind == BlockKind::FuelCell ||
-            kind == BlockKind::Moderator ||
-            kind == BlockKind::Reflector) {
-            protectedPositions.at(static_cast<size_t>(idx)) = true;
-        }
-    }
-    return protectedPositions;
-}
-
 std::optional<OptimizationResult> tryFinalizeQuadFuelLineSkeleton(
     QuadFuelLineSkeleton skeleton, const BuildRequest& request,
     const std::atomic_bool* cancelRequested) {
@@ -1436,7 +1421,7 @@ std::optional<OptimizationResult> tryFinalizeQuadFuelLineSkeleton(
         compactEmptyInteriorPlanes(std::move(skeleton.grid));
     sim = simulateMixedFuel(skeleton.grid);
     const StateVector compactedProtected =
-        protectQuadFuelLines(skeleton.grid);
+        protectFuelLineBlocks(skeleton.grid);
     if (canAttemptConductorBridge(skeleton.grid, sim)) {
         ConductorBridgeResult bridge =
             connectHeatingClustersWithConductors(
@@ -1767,7 +1752,7 @@ std::optional<OptimizationResult> finalizeQuadMergedCandidate(
         compactEmptyInteriorPlanes(std::move(candidate.grid));
     candidate.sim = simulateMixedFuel(candidate.grid);
     const StateVector protectedPositions =
-        protectQuadFuelLines(candidate.grid);
+        protectFuelLineBlocks(candidate.grid);
     if (canAttemptConductorBridge(candidate.grid, candidate.sim)) {
         ConductorBridgeResult bridge =
             connectHeatingClustersWithConductors(

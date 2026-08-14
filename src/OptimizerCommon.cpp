@@ -977,6 +977,20 @@ std::vector<Pos> fuelPositionsInGrid(const Grid& grid) {
     return positions;
 }
 
+StateVector protectFuelLineBlocks(const Grid& grid) {
+    StateVector protectedPositions(static_cast<size_t>(grid.volume()), false);
+    for (const Pos& pos : grid.interiorPositions()) {
+        const int idx = grid.index(pos.x, pos.y, pos.z);
+        const BlockKind kind = grid.atIndex(idx).kind;
+        if (kind == BlockKind::FuelCell ||
+            kind == BlockKind::Moderator ||
+            kind == BlockKind::Reflector) {
+            protectedPositions.at(static_cast<size_t>(idx)) = true;
+        }
+    }
+    return protectedPositions;
+}
+
 bool isPreCompactRunnable(const FuelSimulation& sim);
 bool restoreDirectionalFuelLines(Grid& grid, const BuildRequest& request, const std::vector<int>& sourceDirections,
                                  const std::vector<FuelLineSpec>& fuelLines);

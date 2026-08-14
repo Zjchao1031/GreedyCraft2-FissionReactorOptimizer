@@ -168,6 +168,7 @@ std::optional<FinalizeResult> tryHighHeatSingleFuelFinalization(
 std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
     Grid grid, const BuildRequest& request,
     const std::vector<FuelLayoutContext>& fuelContexts,
-    const std::atomic_bool* cancelRequested);
+    const std::atomic_bool* cancelRequested,
+    bool allowDisconnectedFunctionalBlocks = false);
 
 } // namespace ncfr::optimizer_detail

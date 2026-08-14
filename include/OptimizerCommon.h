@@ -36,6 +36,7 @@ void fillSupportBlocks(Grid& grid,
                        const SupportBlockOptions* supportOptions = nullptr,
                        const StateVector* protectedPositions = nullptr);
 std::vector<Pos> fuelPositionsInGrid(const Grid& grid);
+StateVector protectFuelLineBlocks(const Grid& grid);
 bool allSourcesTargetFuel(const Grid& grid);
 std::vector<SourcePrimingTarget> sourcePrimingTargets(const Grid& grid);
 bool matchesSourcePrimingTargets(

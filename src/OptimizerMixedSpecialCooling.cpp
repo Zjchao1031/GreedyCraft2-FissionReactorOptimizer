@@ -19,7 +19,8 @@ namespace ncfr::optimizer_detail {
 std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
     Grid grid, const BuildRequest& request,
     const std::vector<FuelLayoutContext>& fuelContexts,
-    const std::atomic_bool* cancelRequested) {
+    const std::atomic_bool* cancelRequested,
+    bool allowDisconnectedFunctionalBlocks) {
     FuelSimulation currentSim = simulateMixedFuel(grid);
     const long long initialDeficit =
         currentSim.rawHeating - currentSim.cooling;
@@ -61,7 +62,8 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
 #endif
         return std::nullopt;
     }
-    if (currentSim.disconnectedFunctionalBlocks != 0) {
+    if (!allowDisconnectedFunctionalBlocks &&
+        currentSim.disconnectedFunctionalBlocks != 0) {
 #ifndef NDEBUG
         logDualFuelFallbackCheckpoint(
             "rejected", grid, currentSim, initialDeficit, "disconnected");
@@ -82,7 +84,13 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
             "baseline", grid, currentSim, initialDeficit, false, false,
             "alreadyBalanced");
 #endif
-        return isSearchAccepted(grid, currentSim)
+        const bool accepted =
+            isSearchAccepted(grid, currentSim) ||
+            (allowDisconnectedFunctionalBlocks &&
+             currentSim.compatible &&
+             currentSim.minClusterMargin >= 0 &&
+             !hasInvalidSinks(grid, currentSim));
+        return accepted
                    ? std::optional<Grid>(std::move(grid))
                    : std::nullopt;
     }
@@ -215,9 +223,13 @@ std::optional<Grid> tryMixedFuelSpecialCoolingFallback(
                 allowCarobbiite, allowManaDust,
                 "specialSinks=" + std::to_string(sinks.size()));
 #endif
-            if (!isSearchAccepted(finalGrid, finalSim) ||
-                hasInvalidSinks(finalGrid, finalSim) ||
-                finalSim.disconnectedFunctionalBlocks != 0) {
+            const bool accepted =
+                isSearchAccepted(finalGrid, finalSim) ||
+                (allowDisconnectedFunctionalBlocks &&
+                 finalSim.compatible &&
+                 finalSim.minClusterMargin >= 0 &&
+                 !hasInvalidSinks(finalGrid, finalSim));
+            if (!accepted) {
 #ifndef NDEBUG
                 logDualFuelFallbackCheckpoint(
                     "connectionsRejected", finalGrid, finalSim,

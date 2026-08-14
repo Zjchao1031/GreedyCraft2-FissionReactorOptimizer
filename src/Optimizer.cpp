@@ -58,10 +58,10 @@ public:
     }
 };
 
-class SixFuelIrradiatorStrategy final : public OptimizationStrategy {
+class FiveFuelIrradiatorStrategy final : public OptimizationStrategy {
 public:
     OptimizationResult optimize(const BuildRequest& request, const std::atomic_bool* cancelRequested) const override {
-        return optimizeSixFuelIrradiatorLayout(request, cancelRequested);
+        return optimizeFiveFuelIrradiatorLayout(request, cancelRequested);
     }
 };
 
@@ -77,7 +77,7 @@ const OptimizationStrategy& selectStrategy(const BuildRequest& request) {
     static const SingleNonSelfStartingFuelStrategy singleNonSelfStartingFuelStrategy;
     static const DualFuelStrategy dualFuelStrategy;
     static const QuadFuelStrategy quadFuelStrategy;
-    static const SixFuelIrradiatorStrategy sixFuelIrradiatorStrategy;
+    static const FiveFuelIrradiatorStrategy fiveFuelIrradiatorStrategy;
     static const UnimplementedStrategy unimplementedStrategy;
 
     if (request.fuelIndices.size() == 1) {
@@ -92,7 +92,7 @@ const OptimizationStrategy& selectStrategy(const BuildRequest& request) {
         return quadFuelStrategy;
     }
     if (request.fuelIndices.size() == 5) {
-        return sixFuelIrradiatorStrategy;
+        return fiveFuelIrradiatorStrategy;
     }
     return unimplementedStrategy;
 }

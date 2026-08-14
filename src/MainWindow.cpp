@@ -355,16 +355,16 @@ QString blockKindKey(ncfr::BlockKind kind) {
 QJsonObject sizeToJson(const ncfr::Grid& grid) {
     return {
         {QStringLiteral("x"), grid.internalA()},
-        {QStringLiteral("y"), grid.internalC()},
-        {QStringLiteral("z"), grid.internalB()},
+        {QStringLiteral("y"), grid.internalB()},
+        {QStringLiteral("z"), grid.internalC()},
     };
 }
 
 QJsonObject fullSizeToJson(const ncfr::Grid& grid) {
     return {
         {QStringLiteral("x"), grid.width()},
-        {QStringLiteral("y"), grid.depth()},
-        {QStringLiteral("z"), grid.height()},
+        {QStringLiteral("y"), grid.height()},
+        {QStringLiteral("z"), grid.depth()},
     };
 }
 
@@ -486,8 +486,8 @@ QJsonObject blockToJson(const ncfr::Grid& grid, int x, int y, int z) {
     const ncfr::Block& block = grid.at(x, y, z);
     QJsonObject object{
         {QStringLiteral("x"), x},
-        {QStringLiteral("y"), z + 1},
-        {QStringLiteral("z"), y},
+        {QStringLiteral("y"), y},
+        {QStringLiteral("z"), z},
         {QStringLiteral("kind"), blockKindKey(block.kind)},
         {QStringLiteral("type"), block.type},
         {QStringLiteral("displayName"), fromUtf8String(ncfr::blockDisplayName(block))},
@@ -571,9 +571,9 @@ QJsonObject requestToJson(const ncfr::BuildRequest& request) {
 
 QJsonObject gridToJson(const ncfr::Grid& grid) {
     QJsonArray layers;
-    for (int z = 0; z < grid.depth(); ++z) {
+    for (int y = 0; y < grid.height(); ++y) {
         QJsonArray blocks;
-        for (int y = 0; y < grid.height(); ++y) {
+        for (int z = 0; z < grid.depth(); ++z) {
             for (int x = 0; x < grid.width(); ++x) {
                 if (grid.at(x, y, z).kind == ncfr::BlockKind::Empty) {
                     continue;
@@ -582,14 +582,14 @@ QJsonObject gridToJson(const ncfr::Grid& grid) {
             }
         }
         layers.append(QJsonObject{
-            {QStringLiteral("y"), z + 1},
+            {QStringLiteral("y"), y},
             {QStringLiteral("blocks"), blocks},
         });
     }
 
     return {
         {QStringLiteral("coordinateSystem"),
-         QString::fromUtf8("坐标与二维分层方案一致：x 为横向列，y 为层号，z 为纵向行；x/z 从 0 开始，y 从 1 开始；blocks 仅包含非空方块。")},
+         QString::fromUtf8("坐标与内部Grid一致：x 为横向，y 为垂直层高，z 为层内行；x/y/z 均从 0 开始；blocks 仅包含非空方块。")},
         {QStringLiteral("layers"), layers},
     };
 }
@@ -605,7 +605,7 @@ QJsonDocument resultToJsonDocument(const ncfr::OptimizationResult& result) {
 
     return QJsonDocument(QJsonObject{
         {QStringLiteral("schema"), QStringLiteral("nuclearcraft-fission-reactor-result")},
-        {QStringLiteral("schemaVersion"), 8},
+        {QStringLiteral("schemaVersion"), 9},
         {QStringLiteral("request"), requestToJson(result.request)},
         {QStringLiteral("internalSize"), sizeToJson(result.grid)},
         {QStringLiteral("externalSize"), fullSizeToJson(result.grid)},
@@ -1369,7 +1369,7 @@ void MainWindow::replaceSelectedFuel(QListWidgetItem* item) {
     currentResult_->request = std::move(trialRequest);
     ncfr::updateResultMetrics(*currentResult_, sim);
 
-    const int currentLayer = layerSpin_ != nullptr ? layerSpin_->value() - 1 : pos.z;
+    const int currentLayer = layerSpin_ != nullptr ? layerSpin_->value() - 1 : pos.y;
     gridWidget_->setGrid(&currentResult_->grid);
     gridWidget_->setLayer(currentLayer);
     showFuelReplacementCandidates(pos.x, pos.y, pos.z, currentResult_->grid.index(pos.x, pos.y, pos.z));
@@ -1400,7 +1400,7 @@ void MainWindow::updateResultView() {
 
     const ncfr::OptimizationResult& result = *currentResult_;
     layerSpin_->blockSignals(true);
-    layerSpin_->setRange(1, result.grid.depth());
+    layerSpin_->setRange(1, result.grid.height());
     layerSpin_->setValue(1);
     layerSpin_->setEnabled(true);
     layerSpin_->blockSignals(false);
